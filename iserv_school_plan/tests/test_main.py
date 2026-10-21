@@ -9,6 +9,7 @@ import pytest
 
 import app.main as main_module
 from app.config import AddonOptions
+from app.iserv import FetchError
 from app.main import Addon
 from app.plan import TZ, DayPlan, Lesson, PlanDataset
 
@@ -171,6 +172,31 @@ def test_dump_raw_writes_files(tmp_path, monkeypatch) -> None:
     assert (tmp_path / "debug" / "plan_raw.json").exists()
     meta = json.loads((tmp_path / "debug" / "plan_raw.meta.json").read_text(encoding="utf-8"))
     assert meta["content_type"] == "application/json"
+
+
+def test_failed_refresh_dumps_raw_response(tmp_path, monkeypatch) -> None:
+    """Auch fehlgeschlagene Antworten landen im Debug-Dump (IServ-Web-App)."""
+    monkeypatch.setattr(main_module, "DEBUG_DIR", tmp_path / "debug")
+    addon = make_addon(debug_dump=True)
+
+    class FailingClient:
+        last_raw = "<html><title>IServ</title><div id=\"app\"></div></html>"
+        last_content_type = "text/html"
+        last_url = "https://schule.example.org/iserv/timetable"
+
+        def fetch_dataset(self, default_year=None):  # noqa: ARG002 - Testdouble
+            raise FetchError("Plan enthielt keine verwertbaren Daten")
+
+        def invalidate_session(self) -> None:
+            return None
+
+    addon.client = FailingClient()
+    addon.refresh(datetime(2026, 10, 21, 7, 0, tzinfo=TZ))
+
+    assert addon.last_error is not None
+    assert (tmp_path / "debug" / "plan_raw.html").exists()
+    meta = json.loads((tmp_path / "debug" / "plan_raw.meta.json").read_text(encoding="utf-8"))
+    assert meta["content_type"] == "text/html"
 
 
 def test_invalid_options_are_reported_but_addon_keeps_running() -> None:

@@ -1,5 +1,5 @@
 name: IServ Stundenplan
-version: "1.0.3"
+version: "1.0.4"
 slug: iserv_school_plan
 description: >-
   Liest den IServ-Stundenplan (HTML, JSON oder ICS) und stellt Stundenbeginn,

@@ -17,7 +17,7 @@ from .iserv import AuthError, FetchError, IservClient, IservOptions
 from .mqtt import MqttPublisher, supervisor_mqtt_config
 from .plan import TZ, PlanDataset, apply_period_times, select_plan
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -146,7 +146,7 @@ class Addon:
             meta = {
                 "content_type": content_type,
                 "plan_url": self.options.plan_url,
-                "resolved_url": self.client.last_url,
+                "resolved_url": getattr(self.client, "last_url", "") or "",
                 "bytes": len(raw),
                 "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
             }
@@ -179,6 +179,9 @@ class Addon:
             self.last_error = str(err)
             self.client.invalidate_session()
             _LOGGER.warning("Plan-Abruf fehlgeschlagen: %s", err)
+            # Auch Fehlantworten sichern - bei der neuen IServ-Web-App ist genau
+            # dieses HTML die Grundlage fuer die Parser-Anpassung.
+            self.dump_raw(self.client.last_raw, self.client.last_content_type)
             return
         except Exception as err:  # pragma: no cover - unerwartete Fehler sichtbar machen
             self.last_error = f"Unerwarteter Fehler: {err}"

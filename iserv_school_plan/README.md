@@ -63,8 +63,8 @@ YAML-Einträge in Home Assistant nötig.
 
 | Option | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
-| `iserv_url` | URL | `https://schule.example.org` | Basisadresse der Schule, z. B. `https://ebg.kiel.eu` |
-| `plan_url` | Text | *(leer)* | Pfad oder vollständige URL des Stundenplans/Exports, z. B. `/iserv/plan/export/…` oder `/iserv/plan` |
+| `iserv_url` | URL | `https://schule.example.org` | Basisadresse der Schule, z. B. `https://ebg.kiel.eu` – mit oder ohne `/iserv` am Ende |
+| `plan_url` | Text | *(leer)* | Pfad oder vollständige URL des Stundenplans/Exports, z. B. `/iserv/plan` oder `/iserv/plan/export/…` (nicht die Web-App `/iserv/timetable`) |
 | `username` | Text | *(leer)* | IServ-Benutzername (leer = ohne Login abrufen) |
 | `password` | Passwort | *(leer)* | IServ-Passwort |
 | `plan_format` | Auswahl | `auto` | `auto`, `html`, `json` oder `ics` |
@@ -252,10 +252,10 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | Symptom | Ursache / Lösung |
 | --- | --- |
 | Status `error`, `last_error: plan_url fehlt` | `plan_url` in der Add-on-Konfiguration setzen |
-| `Login fehlgeschlagen …` | Benutzername/Passwort prüfen; Schul-URL prüfen (`/iserv/auth/login`) |
+| `Login fehlgeschlagen …` | Benutzername/Passwort prüfen; Schul-URL prüfen (`/iserv/auth/login`). Ab 1.0.4 steht der IServ-Hinweis dabei (z. B. „Bitte warten Sie … Sekunden“ = Brute-Force-Schutz nach mehreren Starts) |
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
 | `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
-| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Ab 1.0.3 nennt die Meldung „keine HTML-Tabelle in der Antwort“, wenn `plan_url` auf die JavaScript-Web-App zeigt – dann die klassische Plantabelle (`/iserv/plan`) verwenden. Sonst `debug_dump: true` aktivieren, Add-on neu starten und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Die Meldung enthält eine Kurzfassung der Antwort (Länge, `<title>`, `<table>`, erste Skript-URLs). Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
 | `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
 | Zeiten wirken verschoben | Prüfen, ob IServ lokale Zeiten liefert; `period_times` ist nur ein Fallback |

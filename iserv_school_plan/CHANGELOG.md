@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.4
+
+- Fix: `iserv_url` darf jetzt mit und ohne `/iserv` eingetragen werden. Bisher
+  entstand daraus beim Login ein doppelter Pfad (`/iserv/iserv/auth/login`), der
+  je nach Server zu „Login fehlgeschlagen – IServ zeigt erneut die Anmeldeseite“
+  führte
+- Neu: Liefert `plan_url` keine Tabelle (typisch für die neue JavaScript-Web-App
+  unter `/iserv/timetable`), probiert das Add-on automatisch `/iserv/plan` und
+  `/iserv/timetable` als klassische Plantabelle und nutzt die erste Antwort mit
+  Daten. Im Log steht, welche URL funktioniert hat
+- Login-Fehler nennen jetzt den Grund von IServ: Brute-Force-Wartezeit
+  (`Bitte warten Sie … Sekunden`) oder den Hinweistext der Anmeldeseite
+- Fehlermeldung „keine verwertbaren Daten“ enthält eine Kurzfassung der Antwort
+  (Länge, `<title>`, vorhandene `<table>`, erste Skript-URLs) – damit lässt sich
+  die neue IServ-Web-App im Log erkennen, ohne Debug-Dump zu kopieren
+- Antworten, die inhaltlich die Anmeldeseite sind, werden auch ohne
+  `/auth/login` in der URL als Sitzungsablauf erkannt
+- `debug_dump: true` speichert jetzt auch fehlgeschlagene Antworten unter
+  `/data/debug/plan_raw.*`
+
 ## 1.0.3
 
 - Diagnose: Bei `MQTT-Verbindung abgelehnt` steht jetzt der verwendete

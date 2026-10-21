@@ -8,8 +8,10 @@ stattfindende Unterrichtsstunde per MQTT Discovery in Home Assistant bereit.
 1. MQTT-Broker (Mosquitto-Add-on) und MQTT-Integration einrichten. Bei
    `mqtt_host: core-mosquitto` werden die Zugangsdaten automatisch beim
    Supervisor abgefragt.
-2. `iserv_url` auf die Schuladresse setzen, z. B. `https://ebg.kiel.eu`.
-3. `plan_url` auf den Stundenplan/Export setzen, z. B. `/iserv/plan`.
+2. `iserv_url` auf die Schuladresse setzen, z. B. `https://ebg.kiel.eu` –
+   mit oder ohne `/iserv` am Ende, beides funktioniert.
+3. `plan_url` auf die klassische Plantabelle bzw. den Export setzen, z. B.
+   `/iserv/plan` (nicht `/iserv/timetable`: das ist die JavaScript-Web-App).
 4. Benutzername und Passwort eintragen, falls der Plan nicht öffentlich ist.
 5. Optional `free_days` (Ferien/Feiertage) und `period_times` (Stundenzeiten)
    ergänzen.
@@ -49,7 +51,9 @@ Repositories.
 - Bei „Plan enthielt keine verwertbaren Daten“: `debug_dump: true` setzen, Add-on
   neu starten und `/data/debug/plan_raw.*` prüfen. Meldet das Add-on „keine
   HTML-Tabelle in der Antwort“, zeigt `plan_url` auf die JavaScript-Web-App von
-  IServ – dann die klassische Plantabelle (z. B. `/iserv/plan`) eintragen.
+  IServ – ab Version 1.0.4 werden automatisch `/iserv/plan` und
+  `/iserv/timetable` als klassische Tabelle probiert; das Log nennt die URL, die
+  Daten geliefert hat.
 - Erscheinen keine Entities: MQTT-Verbindung, Discovery-Prefix und
   Broker-Zugangsdaten kontrollieren.
 - „MQTT-Verbindung abgelehnt: Not authorized“: Die Ports in der

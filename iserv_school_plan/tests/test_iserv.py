@@ -14,11 +14,13 @@ from app.iserv import (
     ACCEPT_HTML,
     ACCEPT_JSON,
     AuthError,
+    FetchError,
     IservClient,
     IservOptions,
     _LoginFormParser,
     _accept_for,
     _detect_fields,
+    _looks_like_login_page,
 )
 
 LOGIN_PAGE = """
@@ -46,6 +48,13 @@ PLAN_PAGE = """
 
 SEEN_ACCEPTS: list[str] = []
 
+SPA_PAGE = """
+<html><head><title>IServ</title></head><body>
+<div id="app"></div>
+<script src="/iserv/app/static/js/main.1a2b3c.js"></script>
+</body></html>
+"""
+
 
 class Handler(BaseHTTPRequestHandler):
     def _send(
@@ -68,6 +77,22 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/iserv/auth/login", "/iserv/"):
             self._send(200, LOGIN_PAGE)
         elif self.path == "/plan":
+            if "session=ok" not in (self.headers.get("Cookie") or ""):
+                self.send_response(302)
+                self.send_header("Location", "/iserv/auth/login")
+                self.end_headers()
+                return
+            self._send(200, PLAN_PAGE)
+        elif self.path == "/timetable":
+            # Neue IServ-Web-App: HTML-Huelle ohne Tabellen.
+            if "session=ok" not in (self.headers.get("Cookie") or ""):
+                self.send_response(302)
+                self.send_header("Location", "/iserv/auth/login")
+                self.end_headers()
+                return
+            self._send(200, SPA_PAGE)
+        elif self.path == "/iserv/plan":
+            # Klassische Plantabelle als Ausweichziel.
             if "session=ok" not in (self.headers.get("Cookie") or ""):
                 self.send_response(302)
                 self.send_header("Location", "/iserv/auth/login")
@@ -143,6 +168,67 @@ def test_urls_are_resolved() -> None:
     options = IservOptions(base_url="https://ebg.kiel.eu/", plan_url="/iserv/plan/export")
     assert options.login_url == "https://ebg.kiel.eu/iserv/auth/login"
     assert options.resolved_plan_url == "https://ebg.kiel.eu/iserv/plan/export"
+
+
+def test_base_url_with_iserv_suffix_is_normalized() -> None:
+    # Nutzer tragen die Adresse oft als ".../iserv" ein - daraus darf kein
+    # doppelter Pfad ".../iserv/iserv/auth/login" werden.
+    options = IservOptions(base_url="https://ebg.kiel.eu/iserv/", plan_url="/iserv/plan")
+    assert options.login_url == "https://ebg.kiel.eu/iserv/auth/login"
+    assert options.site_root == "https://ebg.kiel.eu"
+    assert options.resolved_plan_url == "https://ebg.kiel.eu/iserv/plan"
+
+
+def test_fetch_falls_back_to_classic_plan_path(server_url: str) -> None:
+    """plan_url zeigt auf die JS-Web-App - das Add-on nutzt /iserv/plan."""
+    options = IservOptions(
+        base_url=server_url + "/iserv",
+        plan_url="/timetable",
+        username="test",
+        password="geheim",
+    )
+    client = IservClient(options)
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/plan")
+
+
+def test_web_app_without_fallback_reports_response_summary(server_url: str) -> None:
+    options = IservOptions(
+        base_url=server_url,
+        plan_url="/timetable",
+        username="test",
+        password="geheim",
+    )
+    client = IservClient(options)
+    client._fallback_plan_urls = lambda: []  # type: ignore[assignment]
+    with pytest.raises(FetchError) as error:
+        client.fetch_dataset(default_year=2026)
+    message = str(error.value)
+    assert "keine <table>" in message
+    assert "main.1a2b3c.js" in message
+
+
+def test_login_waiting_time_is_reported() -> None:
+    page = '<html><body><div id="waiting-time" data-seconds="30"></div></body></html>'
+    message = IservClient._login_failure_message(page)
+    assert "30 Sekunden" in message
+    assert "Brute-Force-Schutz" in message
+
+
+def test_login_alert_text_is_reported() -> None:
+    page = (
+        '<html><body><div class="alert alert-danger">'
+        "Ungueltige Anmeldedaten</div></body></html>"
+    )
+    message = IservClient._login_failure_message(page)
+    assert "Ungueltige Anmeldedaten" in message
+
+
+def test_login_page_in_body_is_detected() -> None:
+    real_login = '<html><body><form id="login-form" method="post"></form></body></html>'
+    assert _looks_like_login_page("https://schule.de/iserv/plan", real_login) is True
+    assert _looks_like_login_page("https://schule.de/iserv/plan", PLAN_PAGE) is False
 
 
 def test_fetch_html_plan_with_login(server_url: str) -> None:

@@ -28,8 +28,69 @@ from .parsers import parse_payload
 from .plan import PlanDataset
 
 _LOGGER = logging.getLogger(__name__)
-LOGIN_PATH = "/iserv/auth/login"
 USER_AGENT = "HA-IServ-Addon/1.0"
+# Pfade, unter denen IServ die klassische Plantabelle ausliefert. Sie werden nur
+# probiert, wenn die konfigurierte ``plan_url`` keine Tabelle liefert (z. B.
+# weil sie auf die JavaScript-Web-App zeigt).
+FALLBACK_PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
+# Erkennungsmerkmale der IServ-Anmeldeseite (klassische Seite und neue Web-App).
+# Bewusst nur sehr spezifische Marker, damit normale Seiten nicht als Login gelten.
+LOGIN_PAGE_MARKERS = ('id="login-form"', 'id="password_login"')
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_RE = re.compile(r"<script[^>]+src=\"([^\"]+)\"", re.IGNORECASE)
+_WAIT_RE = re.compile(r'data-seconds="(\d+)"')
+# Typische Fehlertexte der IServ-Anmeldeseite (Abgleich auf dem Sichttext).
+LOGIN_ERROR_HINTS = (
+    "Ungültige Anmeldedaten",
+    "Ungueltige Anmeldedaten",
+    "Benutzername oder Passwort",
+    "Anmeldung fehlgeschlagen",
+    "gesperrt",
+    "Bitte warten Sie",
+)
+
+
+def _iserv_url(base_url: str, path: str) -> str:
+    """Bildet eine IServ-URL - auch wenn ``base_url`` schon auf ``/iserv`` endet.
+
+    Nutzer tragen die Adresse mal als ``https://schule.de`` und mal als
+    ``https://schule.de/iserv`` ein. Ohne diese Normalisierung wuerde daraus
+    ``/iserv/iserv/auth/login`` und der Login laeuft ins Leere.
+    """
+    base = (base_url or "").rstrip("/")
+    clean = path.lstrip("/")
+    if base.lower().endswith("/iserv"):
+        return f"{base}/{clean}"
+    return f"{base}/iserv/{clean}"
+
+
+def _looks_like_login_page(url: str, body: str) -> bool:
+    """Erkennt die Anmeldeseite an URL oder Inhalt."""
+    if re.search(r"/auth/login\b", url):
+        return True
+    return any(marker in body for marker in LOGIN_PAGE_MARKERS)
+
+
+def _visible_text(html: str) -> str:
+    text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _html_summary(html: str) -> str:
+    """Kurzfassung einer HTML-Antwort fuer aussagekraeftige Fehlermeldungen."""
+    title_match = _TITLE_RE.search(html)
+    title = title_match.group(1).strip() if title_match else ""
+    scripts = _SCRIPT_RE.findall(html)[:3]
+    parts = [f"{len(html)} Zeichen"]
+    if title:
+        parts.append(f"Titel {title!r}")
+    parts.append("<table> vorhanden" if "<table" in html.lower() else "keine <table>")
+    if scripts:
+        parts.append("Skripte: " + ", ".join(scripts))
+    return "; ".join(parts)
+
+
 # Wichtig: Die neue IServ-Web-App behandelt Anfragen, deren ``Accept``-Header
 # ``application/json`` enthaelt, als API-Aufruf und antwortet ohne API-Token mit
 # HTTP 401 - auch bei gueltiger Sitzung. Darum wird der Header je Endpunkt
@@ -67,7 +128,15 @@ class IservOptions:
 
     @property
     def login_url(self) -> str:
-        return urljoin(self.base_url.rstrip("/") + "/", LOGIN_PATH.lstrip("/"))
+        return _iserv_url(self.base_url, "auth/login")
+
+    @property
+    def site_root(self) -> str:
+        """IServ-Basis ohne ``/iserv``-Suffix (fuer Fallback-Pfade)."""
+        base = self.base_url.rstrip("/")
+        if base.lower().endswith("/iserv"):
+            return base[: -len("/iserv")]
+        return base
 
     @property
     def resolved_plan_url(self) -> str:
@@ -236,7 +305,7 @@ class IservClient:
                     "Origin": self.options.base_url.rstrip("/"),
                 },
             ) as response:
-                self._read(response)
+                body = self._read(response)
                 final_url = response.geturl()
         except HTTPError as err:
             raise AuthError(
@@ -245,12 +314,33 @@ class IservClient:
         except URLError as err:
             raise IservError(f"Login-Request fehlgeschlagen: {err.reason}") from err
 
-        if re.search(r"/auth/login\b", final_url):
-            raise AuthError("Login fehlgeschlagen - IServ zeigt erneut die Anmeldeseite")
+        if _looks_like_login_page(final_url, body):
+            raise AuthError(self._login_failure_message(body))
 
         self._logged_in = True
         _LOGGER.info("IServ-Login erfolgreich (%s)", final_url)
         return True
+
+    @staticmethod
+    def _login_failure_message(body: str) -> str:
+        """Baut aus der erneut gelieferten Anmeldeseite eine klare Meldung."""
+        wait = _WAIT_RE.search(body)
+        if wait and int(wait.group(1)) > 0:
+            return (
+                "Login abgelehnt - IServ verlangt "
+                f"{wait.group(1)} Sekunden Wartezeit vor dem naechsten Versuch "
+                "(Brute-Force-Schutz); bitte Add-on spaeter neu starten"
+            )
+        text = _visible_text(body)
+        for hint in LOGIN_ERROR_HINTS:
+            index = text.find(hint)
+            if index >= 0:
+                excerpt = text[max(0, index - 40) : index + 100].strip()
+                return (
+                    "Login fehlgeschlagen - IServ zeigt erneut die Anmeldeseite "
+                    f"({excerpt})"
+                )
+        return "Login fehlgeschlagen - IServ zeigt erneut die Anmeldeseite"
 
     def _ensure_login(self) -> None:
         if self.options.username and not self._logged_in:
@@ -324,28 +414,85 @@ class IservClient:
             except URLError as err:
                 raise FetchError(f"Plan-Abruf fehlgeschlagen: {err.reason}") from err
 
-        if re.search(r"/auth/login\b", final_url):
-            raise AuthError("Sitzung abgelaufen - IServ leitet auf die Anmeldeseite um")
-
         self.last_raw = text
         self.last_content_type = content_type
         self.last_url = final_url
+
+        if _looks_like_login_page(final_url, text):
+            raise AuthError("Sitzung abgelaufen - IServ leitet auf die Anmeldeseite um")
+
         return text, content_type
 
-    def fetch_dataset(self, default_year: int | None = None) -> PlanDataset:
-        text, content_type = self.fetch_plan_text()
-        dataset = parse_payload(
+    def _fallback_plan_urls(self) -> list[str]:
+        """Klassische Plan-Pfade, die als Ausweichziel probiert werden."""
+        configured = self.options.resolved_plan_url.rstrip("/").lower()
+        urls: list[str] = []
+        for path in FALLBACK_PLAN_PATHS:
+            url = self.options.site_root + path
+            if url.rstrip("/").lower() == configured or url in urls:
+                continue
+            urls.append(url)
+        return urls
+
+    def _parse_dataset(
+        self,
+        text: str,
+        content_type: str,
+        default_year: int | None,
+        fmt: str | None = None,
+    ) -> PlanDataset:
+        return parse_payload(
             text,
-            fmt=self._format_override or self.options.plan_format,
+            fmt=fmt or self._format_override or self.options.plan_format,
             source=self.options.plan_url,
             klasse=self.options.klasse or None,
             default_year=default_year,
             content_type=content_type,
         )
-        if not dataset.days:
-            raise FetchError(
-                "Plan enthielt keine verwertbaren Daten: "
-                + ("; ".join(dataset.warnings) or "unbekanntes Format")
-            )
-        return dataset
+
+    def _try_fallback(self, default_year: int | None) -> PlanDataset | None:
+        """Probiert klassische Plan-Pfade, wenn ``plan_url`` keine Tabelle liefert.
+
+        Die neue IServ-Web-App liefert unter ``/iserv/timetable`` nur eine
+        JavaScript-Huelle. Die klassische Tabelle liegt oft weiterhin unter
+        ``/iserv/plan`` - das wird hier einmalig getestet.
+        """
+        for url in self._fallback_plan_urls():
+            try:
+                text, content_type, final_url = self._plan_request(url, ACCEPT_HTML)
+            except (HTTPError, URLError, IservError) as err:
+                _LOGGER.debug("Ausweich-Pfad %s nicht abrufbar: %s", url, err)
+                continue
+            if _looks_like_login_page(final_url, text):
+                _LOGGER.debug("Ausweich-Pfad %s liefert die Anmeldeseite", url)
+                continue
+            dataset = self._parse_dataset(text, content_type, default_year, fmt="auto")
+            if dataset.days:
+                self.last_raw = text
+                self.last_content_type = content_type
+                self.last_url = final_url
+                _LOGGER.warning(
+                    "plan_url lieferte keine Tabelle - Daten kommen von %s. "
+                    "Bitte plan_url in den Optionen anpassen.",
+                    url,
+                )
+                return dataset
+            _LOGGER.debug("Auch %s ohne Tabelle (%s)", url, _html_summary(text))
+        return None
+
+    def fetch_dataset(self, default_year: int | None = None) -> PlanDataset:
+        text, content_type = self.fetch_plan_text()
+        dataset = self._parse_dataset(text, content_type, default_year)
+        if dataset.days:
+            return dataset
+
+        fallback = self._try_fallback(default_year)
+        if fallback is not None:
+            return fallback
+
+        warnings = "; ".join(dataset.warnings) or "unbekanntes Format"
+        raise FetchError(
+            "Plan enthielt keine verwertbaren Daten: "
+            f"{warnings} [Antwort: {_html_summary(self.last_raw)}]"
+        )
 
