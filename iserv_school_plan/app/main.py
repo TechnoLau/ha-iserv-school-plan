@@ -17,7 +17,7 @@ from .iserv import IservClient, IservError, IservOptions
 from .mqtt import MqttPublisher, supervisor_mqtt_config
 from .plan import TZ, PlanDataset, apply_period_times, select_plan
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.11
+
+- Fehler aus 1.0.10 behoben: Der JSON-Abruf fragte 22 Tage auf einmal ab
+  (`startDate` 20.10. bis `endDate` 11.11.). IServs Stundenplanmodul akzeptiert
+  im Filter aber nur **genau eine Woche** und antwortete mit HTTP 400
+  („Fehler beim Verarbeiten der Anfrage“) - die Meldung zeigte brav
+  `[JSON: data?filter: HTTP 400 …]`, aber es kamen keine Stunden. Jetzt wird -
+  wie die Ansicht selbst - Woche fuer Woche (Montag bis Sonntag) gefragt und
+  die Antworten werden zusammengefasst (doppelte Stunden werden dabei
+  verworfen). Die filterlose Adresse bleibt als Notnagel
+- Fehlermeldung zeigt den Antwortanfang jetzt mit 200 statt 80 Zeichen, damit
+  Meldungen wie „Fehler beim Verarbeiten der Anfrage“ nicht abgeschnitten
+  werden. Mehr als vier Versuche werden nicht aufgelistet (Wochen wiederholen
+  sich sonst)
+- Testserver verhaelt sich wie IServ: `timetable/data` ohne Filter oder mit
+  einem Zeitraum groesser als eine Woche antwortet mit HTTP 400 - genau der
+  Fall, der 1.0.10 scheitern liess
+
 ## 1.0.10
 
 - Fehler aus 1.0.9 behoben: Der JSON-Abruf schickte `Accept: application/json`.

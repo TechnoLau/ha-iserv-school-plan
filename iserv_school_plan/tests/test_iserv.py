@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -919,16 +919,27 @@ PORTAL_JSON = json.dumps(
     }
 )
 
-PORTAL_STATE: dict[str, object] = {"body": PORTAL_JSON, "deny": False}
+PORTAL_STATE: dict[str, object] = {"body": PORTAL_JSON, "deny": False, "echo": False}
 PORTAL_HITS: list[tuple[str, str, str]] = []
+# So antwortet das IServ-Modul, wenn der Filter nicht passt (echter Wortlaut).
+ISERV_BAD_REQUEST = json.dumps(
+    {
+        "status": "error",
+        "messages": [{"type": "error", "text": "Fehler beim Verarbeiten der Anfrage"}],
+    }
+)
 
 
 class PortalHandler(BaseHTTPRequestHandler):
     """Testserver: HTML nur Geruest, Stunden kommen aus ``timetable/data``.
 
-    Der Server verhaelt sich wie IServ: Enthaelt ``Accept`` ``application/json``,
-    gilt die Anfrage als API-Aufruf ohne Token und wird mit HTTP 401
-    abgewiesen - unabhaengig von der Sitzung.
+    Der Server verhaelt sich wie IServ:
+
+    * ``Accept`` mit ``application/json`` gilt als API-Aufruf ohne Token
+      (HTTP 401), unabhaengig von der Sitzung.
+    * ``timetable/data`` verlangt einen ``filter`` und akzeptiert darin nur
+      genau eine Woche (Montag bis Sonntag) - ein groesserer Zeitraum wird mit
+      HTTP 400 und „Fehler beim Verarbeiten der Anfrage“ abgewiesen.
     """
 
     def _send(
@@ -940,6 +951,22 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def _filter_window(self) -> tuple[date, date] | None:
+        """Wochenfilter wie IServ pruefen - ``None`` heisst HTTP 400."""
+        query = parse_qs(urlsplit(self.path).query)
+        raw = query.get("filter")
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw[0])
+            start = datetime.strptime(payload["startDate"], "%d.%m.%Y").date()
+            end = datetime.strptime(payload["endDate"], "%d.%m.%Y").date()
+        except (KeyError, TypeError, ValueError):
+            return None
+        if start.weekday() != 0 or (end - start).days != 6:
+            return None
+        return start, end
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         accept = self.headers.get("Accept") or ""
@@ -963,7 +990,29 @@ class PortalHandler(BaseHTTPRequestHandler):
         elif self.path == "/iserv/timetable":
             self._send(200, PORTAL_PAGE)
         elif self.path.startswith("/iserv/timetable/data"):
-            self._send(200, str(PORTAL_STATE["body"]), "application/json; charset=utf-8")
+            window = self._filter_window()
+            if window is None:
+                self._send(400, ISERV_BAD_REQUEST, "application/json; charset=utf-8")
+                return
+            body = str(PORTAL_STATE["body"])
+            if PORTAL_STATE["echo"]:
+                # Jede Woche eine eigene Stunde - so laesst sich das
+                # Zusammenfassen der Wochen pruefen.
+                body = json.dumps(
+                    {
+                        "data": [
+                            {
+                                "date": window[0].isoformat(),
+                                "period": 1,
+                                "start": "07:45",
+                                "end": "08:30",
+                                "subject": "Mathematik",
+                                "room": "A1",
+                            }
+                        ]
+                    }
+                )
+            self._send(200, body, "application/json; charset=utf-8")
         else:
             self._send(404, "not found")
 
@@ -995,6 +1044,7 @@ def portal_url():
     PORTAL_HITS.clear()
     PORTAL_STATE["body"] = PORTAL_JSON
     PORTAL_STATE["deny"] = False
+    PORTAL_STATE["echo"] = False
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
     httpd.server_close()
@@ -1020,19 +1070,42 @@ def test_portal_json_is_used_when_page_is_javascript_shell(portal_url: str) -> N
     assert not [hit for hit in data_hits if "application/json" in hit[2].lower()]
 
 
-def test_portal_json_filter_covers_today() -> None:
-    """Der Filter enthaelt Start-/Enddatum im Format ``TT.MM.JJJJ``."""
+def test_portal_json_filter_is_one_week() -> None:
+    """Der Filter umfasst genau eine Woche (Mo-So) im Format ``TT.MM.JJJJ``.
+
+    Ein groesserer Zeitraum wird von IServ mit HTTP 400 abgewiesen - die
+    Ansicht laedt immer nur eine Woche.
+    """
     client = IservClient(
         IservOptions(base_url="https://schule.de/iserv", username="", password="")
     )
-    url = client._portal_data_urls()[0]
-    assert url.startswith("https://schule.de/iserv/timetable/data?filter=")
-    query = unquote(url.split("filter=", 1)[1])
-    payload = json.loads(query)
-    start = datetime.strptime(payload["startDate"], "%d.%m.%Y").date()
-    end = datetime.strptime(payload["endDate"], "%d.%m.%Y").date()
-    assert start <= date.today() <= end
-    assert (end - start).days > 14
+    urls = client._portal_data_urls()
+    assert urls[0].startswith("https://schule.de/iserv/timetable/data?filter=")
+    assert urls[-1].endswith("/iserv/timetable/data")
+    windows = []
+    for url in urls[:-1]:
+        query = unquote(url.split("filter=", 1)[1])
+        payload = json.loads(query)
+        start = datetime.strptime(payload["startDate"], "%d.%m.%Y").date()
+        end = datetime.strptime(payload["endDate"], "%d.%m.%Y").date()
+        assert start.weekday() == 0
+        assert end.weekday() == 6
+        assert (end - start).days == 6
+        windows.append((start, end))
+    assert len(windows) >= 2, "Vorschaufenster braucht mehrere Wochen"
+    assert windows[0][1] + timedelta(days=1) == windows[1][0]
+    assert windows[0][0] <= date.today() <= windows[-1][1]
+
+
+def test_portal_json_merges_weeks(portal_url: str) -> None:
+    """Wochenweise Antworten werden zu einem Datensatz zusammengefasst."""
+    PORTAL_STATE["echo"] = True
+    client = IservClient(IservOptions(base_url=portal_url, username="test", password="geheim"))
+    dataset = client.fetch_dataset(default_year=2026)
+    assert len(dataset.days) >= 2
+    assert all(len(day.lessons) == 1 for day in dataset.days.values())
+    data_hits = [hit for hit in PORTAL_HITS if hit[0].startswith("/iserv/timetable/data?")]
+    assert len(data_hits) >= len(dataset.days)
 
 
 def test_portal_json_without_lessons_reports_structure(portal_url: str) -> None:

@@ -74,7 +74,10 @@ Repositories.
   (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, mit
   der bestehenden Anmeldung, `X-Requested-With: XMLHttpRequest` und
   `Accept: */*` – `application/json` wertet IServ als API-Aufruf und antwortet
-  mit HTTP 401, deshalb seit 1.0.10 nicht mehr). Erkennt der Parser die Antwort
+  mit HTTP 401, deshalb seit 1.0.10 nicht mehr). Der Filter umfasst seit 1.0.11
+  **genau eine Woche** (Montag bis Sonntag), weil das Modul größere Zeiträume
+  mit HTTP 400 („Fehler beim Verarbeiten der Anfrage“) abweist; die Antworten
+  der Wochen werden zusammengefasst. Erkennt der Parser die Antwort
   nicht, steht ihre Struktur als `[JSON: …]` in `last_error` (nur Schlüssel,
   keine Namen); seit 1.0.10 zusätzlich der HTTP-Status je Versuch. Alternativ
   bleibt der iCal-Export als `plan_url` mit `plan_format: ics` (Adresse muss
