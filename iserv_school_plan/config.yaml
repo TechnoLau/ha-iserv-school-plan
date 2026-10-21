@@ -5,7 +5,7 @@ description: >-
   Liest den IServ-Stundenplan (HTML, JSON oder ICS) und stellt Stundenbeginn,
   erste Unterrichtsstunde, naechsten Schultag und Schulwecker als
   MQTT-Entities in Home Assistant bereit.
-url: https://github.com/DEIN-GITHUB-NAME/ha-iserv-school-plan
+url: https://github.com/TechnoLau/ha-iserv-school-plan
 arch:
   - amd64
   - aarch64

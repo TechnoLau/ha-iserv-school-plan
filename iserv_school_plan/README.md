@@ -40,10 +40,11 @@ YAML-Einträge in Home Assistant nötig.
 ### Variante B: Als Add-on-Repository
 
 1. Dieses Repository zu GitHub pushen (oder forken).
-2. In `repository.yaml` (liegt im Wurzelverzeichnis des Repositories, eine Ebene
-   über `iserv_school_plan/`) sowie in `iserv_school_plan/config.yaml`,
-   `iserv_school_plan/build.yaml` und dieser README die Platzhalter
-   `DEIN-GITHUB-NAME` durch den eigenen GitHub-Namen ersetzen.
+2. Die URLs in `repository.yaml` (Wurzelverzeichnis, eine Ebene über
+   `iserv_school_plan/`), `iserv_school_plan/config.yaml` und
+   `iserv_school_plan/build.yaml` zeigen auf
+   `https://github.com/TechnoLau/ha-iserv-school-plan`. Bei einem Fork unter
+   anderem Account- oder Repo-Namen diese drei Stellen anpassen.
 3. Home Assistant: **Einstellungen → Add-ons → Add-on Store → ⋮ → Repositories →
    Repository hinzufügen** und die Repository-URL eintragen.
 4. Add-on installieren und starten.
