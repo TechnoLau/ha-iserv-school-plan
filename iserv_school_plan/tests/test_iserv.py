@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import threading
-from datetime import date, time
+from datetime import date, datetime, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 import pytest
 
@@ -889,5 +890,138 @@ def test_html_summary_reports_table_structure() -> None:
     )
     assert "Wochengitter mit Datum" in summary
     assert "Montag" in summary
+
+
+# --- JSON-Schnittstelle der neuen Stundenplanansicht ------------------------
+
+PORTAL_PAGE = """
+<html><head><title>Stundenplan - IServ</title></head><body>
+<table>
+  <tr><th>Std.</th><th>Montag</th><th>Dienstag</th><th>Mittwoch</th>
+      <th>Donnerstag</th><th>Freitag</th></tr>
+</table>
+<script src="/iserv/static/js/portal.js"></script>
+</body></html>
+"""
+
+PORTAL_JSON = json.dumps(
+    {
+        "data": [
+            {
+                "date": "2026-10-19",
+                "start": "07:45",
+                "end": "08:30",
+                "subject": "Mathematik",
+                "room": "A1",
+                "period": 1,
+            }
+        ]
+    }
+)
+
+PORTAL_STATE: dict[str, str] = {"body": PORTAL_JSON}
+PORTAL_HITS: list[tuple[str, str]] = []
+
+
+class PortalHandler(BaseHTTPRequestHandler):
+    """Testserver: HTML nur Geruest, Stunden kommen aus ``timetable/data``."""
+
+    def _send(
+        self, status: int, body: str, content_type: str = "text/html; charset=utf-8"
+    ) -> None:
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        PORTAL_HITS.append((self.path, self.headers.get("X-Requested-With") or ""))
+        if self.path in ("/iserv/auth/login", "/iserv/"):
+            self._send(200, LOGIN_PAGE)
+        elif self.path == "/iserv/plan":
+            self._send(404, "not found")
+        elif self.path == "/iserv/timetable":
+            self._send(200, PORTAL_PAGE)
+        elif self.path.startswith("/iserv/timetable/data"):
+            self._send(200, PORTAL_STATE["body"], "application/json; charset=utf-8")
+        else:
+            self._send(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        data = parse_qs(self.rfile.read(length).decode("utf-8"))
+        valid = (
+            data.get("_username") == ["test"]
+            and data.get("_password") == ["geheim"]
+            and data.get("_csrf") == ["token123"]
+        )
+        if not valid:
+            self._send(200, LOGIN_PAGE)
+            return
+        self.send_response(302)
+        self.send_header("Location", "/iserv/")
+        self.send_header("Set-Cookie", "session=ok; Path=/")
+        self.end_headers()
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.fixture()
+def portal_url():
+    """Startet den Testserver mit JSON-Schnittstelle."""
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), PortalHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    PORTAL_HITS.clear()
+    PORTAL_STATE["body"] = PORTAL_JSON
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_portal_json_is_used_when_page_is_javascript_shell(portal_url: str) -> None:
+    """Die HTML-Seite enthaelt nur Kopfzeilen - die Stunden liefert ``data``."""
+    client = IservClient(IservOptions(base_url=portal_url, username="test", password="geheim"))
+    dataset = client.fetch_dataset(default_year=2026)
+    lesson = dataset.days[date(2026, 10, 19)].lessons[0]
+    assert lesson.subject == "Mathematik"
+    assert lesson.room == "A1"
+    assert lesson.period == 1
+    assert lesson.start == time(7, 45)
+    assert "/iserv/timetable/data" in client.last_url
+    data_hits = [hit for hit in PORTAL_HITS if hit[0].startswith("/iserv/timetable/data")]
+    assert data_hits, "JSON-Schnittstelle wurde nicht abgefragt"
+    assert "filter=" in data_hits[0][0]
+    assert data_hits[0][1] == "XMLHttpRequest"
+
+
+def test_portal_json_filter_covers_today() -> None:
+    """Der Filter enthaelt Start-/Enddatum im Format ``TT.MM.JJJJ``."""
+    client = IservClient(
+        IservOptions(base_url="https://schule.de/iserv", username="", password="")
+    )
+    url = client._portal_data_urls()[0]
+    assert url.startswith("https://schule.de/iserv/timetable/data?filter=")
+    query = unquote(url.split("filter=", 1)[1])
+    payload = json.loads(query)
+    start = datetime.strptime(payload["startDate"], "%d.%m.%Y").date()
+    end = datetime.strptime(payload["endDate"], "%d.%m.%Y").date()
+    assert start <= date.today() <= end
+    assert (end - start).days > 14
+
+
+def test_portal_json_without_lessons_reports_structure(portal_url: str) -> None:
+    """Leere Antwort: Fehlermeldung nennt die Schluessel der JSON-Struktur."""
+    PORTAL_STATE["body"] = json.dumps({"data": [], "config": {"week": "A"}})
+    client = IservClient(IservOptions(base_url=portal_url, username="test", password="geheim"))
+    with pytest.raises(FetchError) as error:
+        client.fetch_dataset(default_year=2026)
+    message = str(error.value)
+    assert "/iserv/timetable/data" in message
+    assert "[JSON:" in message
+    assert "config" in message
+
 
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.9
+
+- Neue Datenquelle: die JSON-Schnittstelle der IServ-Stundenplanansicht
+  (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`).
+  Die neue Oberflaeche liefert unter `/iserv/timetable` nur noch ein
+  JavaScript-Geruest (Tabelle mit einer Kopfzeile, Stunden kommen per `portal.js`
+  nach) - bisher blieb der Abruf dort ohne Daten. Das Add-on fragt jetzt - nach
+  der HTML-Auswertung und dem iCal-Export - diese Schnittstelle mit der
+  bestehenden Anmeldung ab (`X-Requested-With: XMLHttpRequest`,
+  `Accept: application/json`). Der Filter wird aus einem Zeitfenster um heute
+  gebaut (1 Tag zurueck, 21 Tage voraus, Format `TT.MM.JJJJ`); ohne Filter wird
+  zusaetzlich probiert
+- Die JSON-Antwort wird tolerant gelesen: erkannt wird eine Stunde an Datum +
+  Fach + (Stunde oder Beginn). Feldnamen duerfen deutsch oder englisch sein
+  (`date`/`datum`, `start`/`beginn`, `subject`/`fach`, `room`/`raum`,
+  `period`/`stunde`), Werte duerfen Objekte sein (`{"name": "Mathematik"}`),
+  Datum darf am Eintrag oder am Tageszweig haengen (`"19.10.2026": [...]`),
+  Datumsformate ISO, `19.10.2026`, `19.10.` und Zeitstempel. Ausfall wird aus
+  `cancelled`/`ausfall`/`art`/`typ` erkannt, Lehrkraft und Hinweis landen in der
+  Notiz. Konfigurations- und Zeitraster-Eintraege werden ignoriert
+- Fehlermeldungen enthalten die Struktur der JSON-Antwort (nur Schluessel,
+  Datums-/Zeitwerte im Klartext, keine Namen), z. B.
+  `[JSON: {"data": [0x …], "config": dict[2]}]` - damit ist ohne `debug_dump`
+  erkennbar, wie die Instanz antwortet
+- Bei Erfolg sagt das Log `Stundenplan aus der IServ-JSON-Schnittstelle gelesen:
+  …/iserv/timetable/data?filter=…`
+
 ## 1.0.8
 
 - IServ-Stundenplanansicht wird ausgewertet: Liefert `/iserv/timetable` die

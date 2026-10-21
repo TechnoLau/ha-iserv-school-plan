@@ -13,7 +13,8 @@ YAML-Einträge in Home Assistant nötig.
 ## Funktionen
 
 - Abruf des IServ-Stundenplans per HTTP(S) inklusive Login (Cookie-Session)
-- Unterstützte Formate: **HTML-Tabelle**, **JSON** und **iCalendar (ICS)**,
+- Unterstützte Formate: **HTML-Tabelle**, **JSON** (auch die JSON-Schnittstelle
+  der neuen IServ-Stundenplanansicht) und **iCalendar (ICS)**,
   automatische Formaterkennung
 - Regeln für den Schulwecker:
   - **Montag–Donnerstag:** vor 12:00 Uhr gilt der heutige Tag, ab 12:00 Uhr der Folgetag
@@ -260,10 +261,10 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
 | `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
 | `Plan-Abruf fehlgeschlagen (HTTP 404)` | Einer der Plan-Pfade existiert auf dieser IServ-Instanz nicht (typisch: Tabelle liegt unter `/iserv/timetable`, `/iserv/plan` ist abgeschaltet – oder umgekehrt). Ab 1.0.7 probiert das Add-on alle bekannten Pfade durch und nennt in `last_error` jede versuchte URL mit Status (`[Versuche: …/iserv/plan: HTTP 404; …/iserv/timetable: HTTP 200]`). Stehen dort ausschließlich 404er, ist das Modul für dieses Konto nicht freigeschaltet oder `iserv_url` zeigt auf den falschen Host |
-| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Ab 1.0.8 nennt die Meldung die **Tabellenstruktur** (`Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf: 'Stunde \| Montag 19.10. \| …', Wochengitter mit Datum`) und nutzt einen auf der Seite verlinkten iCal-Export. „`keine <table>`“ / nur Skript-URLs = JavaScript-Ansicht. Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Ab 1.0.8 nennt die Meldung die **Tabellenstruktur** (`Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf: 'Stunde \| Montag 19.10. \| …', Wochengitter mit Datum`), nutzt einen auf der Seite verlinkten iCal-Export und ab 1.0.9 die JSON-Schnittstelle der Stundenplanansicht; deren Struktur steht bei Fehlschlag als `[JSON: …]` in der Meldung. „`keine <table>`“ / nur Skript-URLs = JavaScript-Ansicht. Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
 | `Wochengitter ohne Datum in der Spaltenueberschrift ignoriert` | Die Seite zeigt die Stundenplan-Woche, aber die Spaltenköpfe enthalten nur Wochentage („Montag“) ohne Datum – ohne Datum ordnet das Add-on keine Stunden zu, statt sie zu raten. Abhilfe: die persönliche iCal-Export-Adresse aus IServ (Stundenplan → Export) als `plan_url` eintragen und `plan_format: ics` setzen, oder in IServ die Ansicht mit Datumsangaben („19.10.“) wählen |
 | `Tabelle ohne erkannte Spaltenueberschrift ignoriert` (2×) | Die Seite enthält Tabellen, aber keine Vertretungsplan-Kopfzeile (`Stunde`/`Zeit`/`Fach`). Seit 1.0.8 wird stattdessen die Wochenansicht (Wochentage als Spalten) ausgewertet; bleibt es bei der Meldung, sagt der Zusatz `Wochengitter …` in derselben Zeile, was gefunden wurde |
-| `Tabellen: 1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'` (Tabellen mit **nur** einer Kopfzeile) | Dann stehen im HTML **keine Unterrichtszeilen** – die neue IServ-Oberfläche lädt sie per JavaScript (`portal.js`) nach, ein HTML-Parser kann sie nicht sehen (auch die Wochenansicht aus 1.0.8 braucht Zeilen im HTML). Lösung **ohne Codeänderung**: die persönliche **iCal-/ICS-Export-Adresse** aus IServ als `plan_url` eintragen und `plan_format: ics` setzen (Stundenplan → „Exportieren“/„iCal“ → Link-Adresse kopieren; existiert nur ein Button, in den Browser-Entwicklertools → Netzwerk die `.ics`-Anfrage kopieren). Die Adresse muss `BEGIN:VCALENDAR` liefern; ein auf der Seite *verlinkter* Export wird ab 1.0.8 automatisch genutzt, ein reiner Button/`POST` nicht |
+| `Tabellen: 1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'` (Tabellen mit **nur** einer Kopfzeile) | Dann stehen im HTML **keine Unterrichtszeilen** – die neue IServ-Oberfläche lädt sie per JavaScript (`portal.js`) nach, ein HTML-Parser kann sie nicht sehen. Ab **1.0.9** holt das Add-on sie selbst über die JSON-Schnittstelle der Ansicht (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, gleiche Anmeldung, `X-Requested-With: XMLHttpRequest`). Klappt das nicht, nennt `last_error` die Struktur der JSON-Antwort (`[JSON: {"data": [0x {…}], …}]`). Alternativ: die persönliche **iCal-/ICS-Export-Adresse** aus IServ als `plan_url` eintragen und `plan_format: ics` setzen (Stundenplan → „Exportieren“/„iCal“ → Link-Adresse kopieren) |
 | `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ (neue Web-Oberfläche) leitete nach dem Login per Meta-Refresh/JavaScript weiter; ab 1.0.6 führt das Add-on diese Weiterleitung selbst aus. Bleibt die Meldung, `log_level: debug` setzen – dort steht das gefundene Weiterleitungsziel. Hilft das nicht, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
 | `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
@@ -324,12 +325,16 @@ Spaltennamen („Fach“, „Raum“, „Zeit“, „Art“, „Klasse“, …) 
 (`07:45 - 08:30`, `7:45`, `745`). Ab Version 1.0.8 wird auch die
 Stundenplan-Wochenansicht gelesen (Spalten = Wochentage mit Datum, Zeilen =
 Stunden, verbundene Zellen für Doppelstunden) sowie – wenn die HTML-Auswertung
-leer bleibt – ein auf der Seite verlinkter iCal-Export. Bei einem unbekannten
-Format:
+leer bleibt – ein auf der Seite verlinkter iCal-Export. Ab Version 1.0.9 fragt
+das Add-on zusätzlich die JSON-Schnittstelle der Stundenplanansicht ab
+(`/iserv/timetable/data?filter={"startDate":"…","endDate":"…"}`), weil die neue
+Oberfläche die Zeilen per JavaScript nachlädt; Feldnamen dürfen dabei deutsch
+oder englisch sein. Bei einem unbekannten Format:
 
 1. `debug_dump: true` setzen und das Add-on neu starten.
 2. `/data/debug/plan_raw.*` und `plan_raw.meta.json` prüfen; die Fehlermeldung
-   nennt zusätzlich die Tabellenstruktur (`Tabellen: … Kopf: … Wochengitter …`).
+   nennt zusätzlich die Tabellenstruktur (`Tabellen: … Kopf: … Wochengitter …`)
+   bzw. die JSON-Struktur (`[JSON: …]`).
 3. Bei Bedarf in `app/parsers.py` einen weiteren Parser ergänzen, in
    `detect_format`/`parse_payload` registrieren und in `tests/test_parsers.py`
    testen.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, time
 
 from app.parsers import (
@@ -9,10 +10,12 @@ from app.parsers import (
     extract_period,
     find_date,
     is_cancelled,
+    json_summary,
     parse_html,
     parse_ics,
     parse_json,
     parse_payload,
+    parse_portal_json,
     parse_time,
     parse_time_range,
     table_summary,
@@ -256,4 +259,123 @@ def test_html_without_table_hints_at_iserv_web_app() -> None:
     dataset = parse_html('<html><body><div id="app"></div><script src="/iserv/app.js"></script></body></html>')
     assert dataset.days == {}
     assert any("JavaScript-Web-App" in warning for warning in dataset.warnings)
+
+
+# --- JSON der IServ-Stundenplanansicht ---------------------------------------
+
+
+def test_parse_portal_json_flat_list() -> None:
+    """Flache Liste (``data`` -> Stunden) mit englischen Feldnamen."""
+    text = json.dumps(
+        {
+            "data": [
+                {
+                    "date": "2026-10-19",
+                    "start": "07:45",
+                    "end": "08:30",
+                    "subject": "Mathematik",
+                    "room": "A1",
+                    "period": 1,
+                },
+                {
+                    "date": "2026-10-19",
+                    "start": "08:35",
+                    "end": "09:20",
+                    "subject": "Deutsch",
+                    "room": "B2",
+                    "period": 2,
+                },
+            ]
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    day = dataset.days[date(2026, 10, 19)]
+    assert [lesson.subject for lesson in day.lessons] == ["Mathematik", "Deutsch"]
+    assert [lesson.period for lesson in day.lessons] == [1, 2]
+    assert day.lessons[0].start == time(7, 45)
+    assert day.lessons[0].room == "A1"
+    assert day.is_school_day is True
+
+
+def test_parse_portal_json_grouped_by_day_with_nested_names() -> None:
+    """Nach Tagen gruppierte Antwort, Fach/Raum/Lehrer als Objekt, ``art`` = Entfall."""
+    text = json.dumps(
+        {
+            "days": {
+                "2026-10-20": {
+                    "stunden": [
+                        {
+                            "stunde": 1,
+                            "beginn": "07:45",
+                            "ende": "08:30",
+                            "fach": {"name": "Mathematik"},
+                            "raum": {"name": "A1"},
+                            "lehrer": {"name": "Muster"},
+                        },
+                        {
+                            "stunde": 2,
+                            "beginn": "08:35",
+                            "fach": {"name": "Deutsch"},
+                            "art": "Entfall",
+                        },
+                    ]
+                }
+            }
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    lessons = dataset.days[date(2026, 10, 20)].lessons
+    assert lessons[0].subject == "Mathematik"
+    assert lessons[0].room == "A1"
+    assert lessons[0].note == "Muster"
+    assert lessons[0].cancelled is False
+    assert lessons[1].cancelled is True
+    assert lessons[1].room == ""
+
+
+def test_parse_portal_json_date_from_branch_key() -> None:
+    """Datum nur am Zweig (``"19.10.2026": [...]``) - gilt fuer alle Eintraege."""
+    text = json.dumps(
+        {"plan": {"19.10.2026": [{"stunde": 3, "fach": "Physik", "raum": "C3"}]}}
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    lesson = dataset.days[date(2026, 10, 19)].lessons[0]
+    assert (lesson.period, lesson.subject) == (3, "Physik")
+
+
+def test_parse_portal_json_ignores_configuration_entries() -> None:
+    """Eintraege ohne Datum/Fach (z. B. Zeitraster) erzeugen keine Stunden."""
+    text = json.dumps(
+        {
+            "periods": [{"period": 1, "start": "07:45", "end": "08:30"}],
+            "settings": {"week": "A", "title": "Stundenplan"},
+            "data": [],
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    assert dataset.days == {}
+    assert any("Struktur" in warning for warning in dataset.warnings)
+
+
+def test_parse_portal_json_without_date_is_ignored() -> None:
+    text = json.dumps({"data": [{"stunde": 1, "fach": "Mathematik"}]})
+    dataset = parse_portal_json(text)
+    assert dataset.days == {}
+
+
+def test_json_summary_names_keys_without_text_values() -> None:
+    summary = json_summary(
+        json.dumps(
+            {
+                "data": [
+                    {"start": "07:45", "subject": "Mathematik", "period": 1}
+                ]
+            }
+        )
+    )
+    assert "data" in summary
+    assert "start" in summary
+    assert "'07:45'" in summary
+    assert "Mathematik" not in summary
+    assert "<str 10>" in summary
 

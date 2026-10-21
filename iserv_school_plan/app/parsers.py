@@ -777,6 +777,281 @@ def parse_json(text: str, source: str = "json") -> PlanDataset:
     return dataset
 
 
+# --- IServ-Portalschnittstelle (``/iserv/timetable/data?...``) ---------------
+# Die neue IServ-Oberflaeche rendert den Stundenplan im Browser und laedt die
+# Stunden als JSON nach. Die Feldnamen unterscheiden sich je nach Installation,
+# deshalb wird ueber Aliase gesucht statt ueber ein festes Schema.
+PORTAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "date": ("date", "datum", "tag", "day", "startdate", "datefrom"),
+    "start": ("start", "beginn", "begin", "starttime", "timefrom", "uhrzeit"),
+    "end": ("end", "ende", "endtime", "timeto"),
+    "period": ("period", "stunde", "stunden", "lesson", "hour", "stundennummer", "periode"),
+    "subject": ("subject", "fach", "fachname", "subjectname", "unterricht", "lessonname", "title"),
+    "room": ("room", "raum", "raumname", "roomname", "location", "ort"),
+    "teacher": ("teacher", "lehrer", "lehrkraft", "teachername", "lehrername"),
+    "note": ("note", "notes", "hinweis", "info", "bemerkung", "comment", "description"),
+    "cancelled": (
+        "cancelled",
+        "canceled",
+        "iscancelled",
+        "iscanceled",
+        "is_cancelled",
+        "ausfall",
+        "entfall",
+        "istausfall",
+        "cancel",
+    ),
+    "type": ("type", "art", "typ", "kind", "status"),
+}
+# Werte sind oft Objekte (``{"name": "Mathematik"}``) statt Strings.
+PORTAL_NAME_KEYS = (
+    "name",
+    "label",
+    "title",
+    "text",
+    "value",
+    "short",
+    "long",
+    "display",
+    "kuerzel",
+    "abbreviation",
+)
+
+
+def _portal_key(value: str) -> str:
+    return re.sub(r"[\s_\-]", "", value).lower()
+
+
+_PORTAL_ALIASES = {
+    field: tuple(_portal_key(alias) for alias in aliases)
+    for field, aliases in PORTAL_FIELDS.items()
+}
+
+
+def _portal_value(value, depth: int = 2) -> str:
+    """Text aus einem beliebigen JSON-Wert (auch ``{"name": ...}``)."""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, str):
+        return normalize_text(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    if depth > 0 and isinstance(value, dict):
+        for key in PORTAL_NAME_KEYS:
+            if key in value:
+                found = _portal_value(value[key], depth - 1)
+                if found:
+                    return found
+        return ""
+    if depth > 0 and isinstance(value, list):
+        for item in value:
+            found = _portal_value(item, depth - 1)
+            if found:
+                return found
+    return ""
+
+
+def _portal_lookup(node: dict) -> dict[str, object]:
+    """Ordnet die Schluessel eines Eintrags den bekannten Feldern zu."""
+    index: dict[str, object] = {}
+    for key, value in node.items():
+        if isinstance(key, str):
+            index.setdefault(_portal_key(key), value)
+    found: dict[str, object] = {}
+    for field, aliases in _PORTAL_ALIASES.items():
+        for alias in aliases:
+            if alias in index:
+                found[field] = index[alias]
+                break
+    return found
+
+
+def _portal_date(value, default_year: int | None = None) -> date | None:
+    """Datum aus ``2026-10-19``, ``19.10.2026``, ``19.10.`` oder Zeitstempel."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = value / 1000 if value > 10_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, TZ).date()
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = _portal_value(value)
+    if not text:
+        return None
+    found = find_date(text, default_year)
+    if found is not None:
+        return found
+    iso = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if iso:
+        return _build_date(int(iso.group(3)), int(iso.group(2)), int(iso.group(1)), None)
+    short = re.match(r"^(\d{1,2})\.\s?(\d{1,2})\.?$", text)
+    if short:
+        year = default_year or datetime.now(TZ).year
+        return _build_date(int(short.group(1)), int(short.group(2)), year, year)
+    return None
+
+
+def _portal_time(value) -> time | None:
+    text = _portal_value(value)
+    if not text:
+        return None
+    iso = re.search(r"T(\d{1,2}):(\d{2})", text)
+    if iso:
+        text = f"{iso.group(1)}:{iso.group(2)}"
+    return parse_time(text)
+
+
+def _portal_lesson(
+    node: dict, day: date | None, default_year: int | None
+) -> Lesson | None:
+    """Ein Eintrag als Unterrichtsstunde - oder ``None``, wenn es keine ist."""
+    if day is None:
+        return None
+    found = _portal_lookup(node)
+    subject = _portal_value(found.get("subject"))
+    # Fach muss Text enthalten ("1" oder "" ist kein Fach).
+    if not re.search(r"[^\W\d_]", subject):
+        return None
+    period = extract_period(_portal_value(found.get("period")))
+    start = _portal_time(found.get("start"))
+    if period is None and start is None:
+        return None
+    kind = _portal_value(found.get("type"))
+    note_parts = [_portal_value(found.get("teacher")), _portal_value(found.get("note"))]
+    note = ", ".join(part for part in note_parts if part)
+    cancelled_value = found.get("cancelled")
+    cancelled = (
+        cancelled_value is True
+        or _portal_value(cancelled_value).lower() in ("true", "1", "ja", "yes")
+        or bool(CANCEL_STRONG_RE.search(kind))
+        or bool(CANCEL_STRONG_RE.search(note))
+    )
+    return Lesson(
+        period=period,
+        start=start,
+        end=_portal_time(found.get("end")),
+        subject=subject,
+        room=_portal_value(found.get("room")),
+        cancelled=cancelled,
+        note=note,
+        date=day,
+    )
+
+
+def _walk_portal(
+    node,
+    context_day: date | None,
+    default_year: int | None,
+    lessons: list[Lesson],
+    seen: set[tuple],
+    depth: int = 0,
+) -> None:
+    """Sucht rekursiv nach Stunden; Datum kann am Eintrag oder am Zweig haengen."""
+    if depth > 8:
+        return
+    if isinstance(node, list):
+        for item in node:
+            _walk_portal(item, context_day, default_year, lessons, seen, depth + 1)
+        return
+    if not isinstance(node, dict):
+        return
+    own_day = _portal_date(_portal_lookup(node).get("date"), default_year) or context_day
+    lesson = _portal_lesson(node, own_day, default_year)
+    if lesson is not None:
+        signature = (
+            lesson.date,
+            lesson.period,
+            lesson.start,
+            lesson.end,
+            lesson.subject,
+            lesson.room,
+            lesson.cancelled,
+        )
+        if signature not in seen:
+            seen.add(signature)
+            lessons.append(lesson)
+        return
+    for key, value in node.items():
+        if not isinstance(value, (dict, list)):
+            continue
+        child_day = _portal_date(key, default_year) if isinstance(key, str) else None
+        _walk_portal(value, child_day or own_day, default_year, lessons, seen, depth + 1)
+
+
+def parse_portal_json(
+    text: str, source: str = "", default_year: int | None = None
+) -> PlanDataset:
+    """Parst die JSON-Schnittstelle der IServ-Stundenplanansicht.
+
+    Die Struktur unterscheidet sich je nach IServ-Version (Liste von Stunden,
+    nach Tagen gruppiert, Feldnamen deutsch oder englisch). Erkannt wird eine
+    Stunde an ``Datum`` + ``Fach`` + (``Stunde`` oder ``Beginn``) - alles andere
+    (Konfiguration, Zeitraster, Rechte) wird ignoriert.
+    """
+    dataset = PlanDataset(source=source or "iserv-json")
+    lessons: list[Lesson] = []
+    try:
+        payload = json.loads(text.lstrip("\ufeff"))
+    except ValueError as err:
+        dataset.warnings.append(f"IServ-JSON nicht lesbar: {err}")
+        return dataset
+    _walk_portal(payload, None, default_year, lessons, set())
+    for lesson in lessons:
+        dataset.add_lesson(lesson, is_school_day=True)
+    if not dataset.days:
+        dataset.warnings.append(
+            "IServ-JSON ohne Stunden - Struktur: " + json_summary(text)
+        )
+    return dataset
+
+
+def _json_sample(value) -> str:
+    """Wertangabe fuer die Struktur-Kurzbeschreibung (keine Namen)."""
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        if re.fullmatch(r"[\d.:\-/T+ ]{1,25}", value):
+            return repr(value)
+        return f"<str {len(value)}>"
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if isinstance(value, dict):
+        return f"dict[{len(value)}]"
+    return type(value).__name__
+
+
+def _json_describe(node, depth: int = 0) -> str:
+    if depth > 2:
+        return "..."
+    if isinstance(node, dict):
+        parts = []
+        for key, value in list(node.items())[:8]:
+            if isinstance(value, (dict, list)):
+                parts.append(f"{key}: {_json_describe(value, depth + 1)}")
+            else:
+                parts.append(f"{key}: {_json_sample(value)}")
+        return "{" + ", ".join(parts) + "}"
+    if isinstance(node, list):
+        return "[]" if not node else f"[{len(node)}x {_json_describe(node[0], depth + 1)}]"
+    return _json_sample(node)
+
+
+def json_summary(text: str, limit: int = 400) -> str:
+    """Kurzfassung einer JSON-Antwort fuer Log und Fehlermeldung.
+
+    Nur Schluessel und Typen (Datums-/Zeitwerte im Klartext), damit im Log
+    erkennbar ist, wie die Schnittstelle aufgebaut ist - ohne Namen oder
+    Schuelerdaten zu protokollieren.
+    """
+    try:
+        payload = json.loads(text.lstrip("\ufeff"))
+    except ValueError as err:
+        return f"kein gueltiges JSON ({err})"
+    summary = _json_describe(payload)
+    if len(summary) > limit:
+        summary = summary[:limit] + "..."
+    return summary
+
+
 def detect_format(text: str, content_type: str = "") -> str:
     content_type = (content_type or "").lower()
     if "calendar" in content_type:

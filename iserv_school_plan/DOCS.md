@@ -69,11 +69,15 @@ Repositories.
   mit `plan_format: ics` eintragen. Zeigen die Tabellen in der Meldung nur
   **eine** Zeile (z. B. `1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'`),
   stehen im HTML überhaupt keine Unterrichtszeilen – IServ lädt sie in der neuen
-  Oberfläche per JavaScript nach (`portal.js`). Dann hilft kein HTML-Parser,
-  sondern nur der iCal-Export als `plan_url` mit `plan_format: ics` (Adresse muss
-  `BEGIN:VCALENDAR` liefern; Button-Export ggf. in den Entwicklertools unter
-  „Netzwerk“ abgreifen). Sonst `debug_dump: true` setzen, Add-on neu
-  starten und `/data/debug/plan_raw.*` prüfen. Meldet das Add-on „keine
+  Oberfläche per JavaScript nach (`portal.js`). Ab Version 1.0.9 holt das Add-on
+  die Stunden deshalb selbst über die JSON-Schnittstelle der Ansicht
+  (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, mit
+  der bestehenden Anmeldung und `X-Requested-With: XMLHttpRequest`). Erkennt der
+  Parser die Antwort nicht, steht ihre Struktur als `[JSON: …]` in `last_error`
+  (nur Schlüssel, keine Namen). Alternativ bleibt der iCal-Export als `plan_url`
+  mit `plan_format: ics` (Adresse muss `BEGIN:VCALENDAR` liefern). Sonst
+  `debug_dump: true` setzen, Add-on neu starten und `/data/debug/plan_raw.*`
+  prüfen. Meldet das Add-on „keine
   HTML-Tabelle in der Antwort“, zeigt `plan_url` auf die JavaScript-Web-App von
   IServ – ab Version 1.0.4 werden automatisch `/iserv/plan` und
   `/iserv/timetable` als klassische Tabelle probiert; das Log nennt die URL, die

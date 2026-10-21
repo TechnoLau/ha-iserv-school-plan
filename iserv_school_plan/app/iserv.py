@@ -9,10 +9,12 @@ Format wird automatisch erkannt (ICS, JSON oder HTML-Tabelle).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import ssl
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from html import unescape
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
@@ -25,8 +27,14 @@ from urllib.request import (
     build_opener,
 )
 
-from .parsers import detect_format, parse_payload, table_summary
-from .plan import PlanDataset
+from .parsers import (
+    detect_format,
+    json_summary,
+    parse_payload,
+    parse_portal_json,
+    table_summary,
+)
+from .plan import TZ, PlanDataset
 
 _LOGGER = logging.getLogger(__name__)
 USER_AGENT = (
@@ -38,6 +46,15 @@ USER_AGENT = (
 # Die weiteren werden probiert, falls der erste keine Tabelle liefert (z. B.
 # weil ``plan_url`` auf die JavaScript-Web-App zeigt).
 PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
+# JSON-Schnittstelle der neuen Stundenplanansicht: Der Browser laedt die Woche
+# mit ``/iserv/timetable/data?filter={"startDate":"19.10.2026",...}`` nach - die
+# HTML-Seite selbst enthaelt oft nur die Kopfzeilen der Tabelle.
+TIMETABLE_DATA_PATH = "timetable/data"
+# Zeitfenster fuer den Filter (heute rueckwaerts/vorwaerts in Tagen). Der
+# Vorlauf deckt die Vorschau des Add-ons (max. 14 Tage) mit Reserve ab.
+PORTAL_DAYS_BACK = 1
+PORTAL_DAYS_AHEAD = 21
+
 # HTTP-Status, mit denen IServ antwortet, wenn ein Modulpfad auf dieser
 # Installation nicht (mehr) existiert. Solche Antworten duerfen den Abruf nicht
 # beenden - der naechste bekannte Plan-Pfad wird probiert (z. B. liefert die
@@ -212,6 +229,17 @@ def _html_summary(html: str) -> str:
     if scripts:
         parts.append("Skripte: " + ", ".join(scripts))
     return "; ".join(parts)
+
+
+def _payload_summary(text: str, content_type: str = "") -> str:
+    """Kurzfassung der letzten Antwort - HTML-Tabellen oder JSON-Struktur."""
+    try:
+        fmt = detect_format(text, content_type)
+    except ValueError:  # pragma: no cover - detect_format wirft nicht
+        fmt = "html"
+    if fmt == "json":
+        return "JSON " + json_summary(text)
+    return _html_summary(text)
 
 
 def _calendar_links(html: str, base_url: str, limit: int = 3) -> list[str]:
@@ -436,6 +464,9 @@ class IservClient:
         # Pfade, die in diesem Durchlauf tatsaechlich geantwortet haben - damit
         # der Ausweich-Pfad sie nicht doppelt abfragt.
         self._tried_urls: set[str] = set()
+        # Struktur der letzten JSON-Antwort (falls sie keine Stunden enthielt) -
+        # landet in der Fehlermeldung, damit die Schnittstelle nachvollziehbar ist.
+        self._portal_hint = ""
 
     def _request(
         self,
@@ -622,9 +653,11 @@ class IservClient:
         """Erzwingt beim naechsten Abruf einen neuen Login."""
         self._logged_in = False
 
-    def _plan_request(self, url: str, accept: str) -> tuple[str, str, str]:
+    def _plan_request(
+        self, url: str, accept: str, headers: dict | None = None
+    ) -> tuple[str, str, str]:
         """Holt die Plan-URL mit einem bestimmten ``Accept``-Header."""
-        with self._request(url, accept=accept) as response:
+        with self._request(url, headers=headers, accept=accept) as response:
             text = self._read(response)
             text, final_url, content_type = self._complete_auth_redirects(
                 response, text, accept
@@ -634,7 +667,7 @@ class IservClient:
             # OIDC-Bestaetigung) - jetzt ist die Sitzung vollstaendig, also die
             # eigentliche Plan-URL erneut abrufen.
             _LOGGER.debug("Plan wird nach der Login-Weiterleitung erneut geladen: %s", url)
-            with self._request(url, accept=accept) as response:
+            with self._request(url, headers=headers, accept=accept) as response:
                 text = self._read(response)
                 text, final_url, content_type = self._complete_auth_redirects(
                     response, text, accept
@@ -889,7 +922,80 @@ class IservClient:
             _LOGGER.debug("iCal-Export %s enthielt keine Termine", link)
         return None
 
+    def _portal_data_urls(self) -> list[str]:
+        """Kandidaten der JSON-Schnittstelle der Stundenplanansicht.
+
+        Der Browser ruft ``/iserv/timetable/data?filter={"startDate":"19.10.2026",
+        "endDate":"25.10.2026"}`` auf. Der Filter wird hier fuer ein Fenster um
+        heute gebaut (``TT.MM.JJJJ``), damit die Vorschau des Add-ons abgedeckt
+        ist. Zusaetzlich wird die Adresse ohne Filter probiert - aeltere
+        Installationen liefern die Woche dann ungefiltert.
+        """
+        base = _iserv_url(self.options.base_url, TIMETABLE_DATA_PATH)
+        today = datetime.now(TZ).date()
+        filter_json = json.dumps(
+            {
+                "startDate": (today - timedelta(days=PORTAL_DAYS_BACK)).strftime(
+                    "%d.%m.%Y"
+                ),
+                "endDate": (today + timedelta(days=PORTAL_DAYS_AHEAD)).strftime(
+                    "%d.%m.%Y"
+                ),
+            },
+            separators=(",", ":"),
+        )
+        return [f"{base}?{urlencode({'filter': filter_json})}", base]
+
+    def _try_portal_json(self, default_year: int | None) -> PlanDataset | None:
+        """Liest den Plan aus der JSON-Schnittstelle der Web-Oberflaeche.
+
+        Die HTML-Ansicht der neuen IServ-Oberflaeche enthaelt oft nur die
+        Kopfzeilen der Wochentabelle - die Stunden laedt ``portal.js`` als JSON
+        nach. Ohne diesen Weg sieht der Plan im Browser vollstaendig aus, das
+        Add-on erhaelt aber keine einzige Zeile.
+        """
+        headers = {"X-Requested-With": "XMLHttpRequest"}
+        for url in self._portal_data_urls():
+            if url in self._tried_urls:
+                continue
+            self._tried_urls.add(url)
+            try:
+                text, content_type, final_url = self._plan_request(
+                    url, ACCEPT_JSON, headers
+                )
+            except (HTTPError, URLError, IservError) as err:
+                _LOGGER.debug("IServ-JSON %s nicht abrufbar: %s", url, err)
+                continue
+            if detect_format(text, content_type) != "json":
+                _LOGGER.debug(
+                    "IServ-JSON %s lieferte kein JSON (Content-Type %s)",
+                    url,
+                    content_type,
+                )
+                continue
+            dataset = PlanDataset(source=url)
+            try:
+                dataset = self._parse_dataset(text, content_type, default_year, fmt="json")
+            except (ValueError, TypeError):
+                dataset = PlanDataset(source=url)
+            if not dataset.days:
+                dataset = parse_portal_json(
+                    text, source=url, default_year=default_year
+                )
+            if dataset.days:
+                self.last_raw = text
+                self.last_content_type = content_type
+                self.last_url = final_url
+                _LOGGER.info(
+                    "Stundenplan aus der IServ-JSON-Schnittstelle gelesen: %s", url
+                )
+                return dataset
+            self._portal_hint = json_summary(text)
+            _LOGGER.debug("IServ-JSON %s ohne Stunden (%s)", url, self._portal_hint)
+        return None
+
     def fetch_dataset(self, default_year: int | None = None) -> PlanDataset:
+        self._portal_hint = ""
         text, content_type = self.fetch_plan_text()
         dataset = self._parse_dataset(text, content_type, default_year)
         if dataset.days:
@@ -901,14 +1007,20 @@ class IservClient:
         if export is not None:
             return export
 
+        portal = self._try_portal_json(default_year)
+        if portal is not None:
+            return portal
+
         fallback = self._try_fallback(default_year)
         if fallback is not None:
             return fallback
 
         warnings = "; ".join(dataset.warnings) or "unbekanntes Format"
         checked = ", ".join(sorted(self._tried_urls)) or self.options.resolved_plan_url
+        hint = f" [JSON: {self._portal_hint}]" if self._portal_hint else ""
         raise FetchError(
             "Plan enthielt keine verwertbaren Daten: "
-            f"{warnings} [geprueft: {checked}] [Antwort: {_html_summary(self.last_raw)}]"
+            f"{warnings} [geprueft: {checked}]{hint} "
+            f"[Antwort: {_payload_summary(self.last_raw, self.last_content_type)}]"
         )
 
