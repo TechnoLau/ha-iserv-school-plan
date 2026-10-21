@@ -25,3 +25,13 @@ jobs:
         run: python -m pytest -q
       - name: Syntax pruefen
         run: python -m compileall -q iserv_school_plan/app iserv_school_plan/tests
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image bauen
+        run: docker build --tag iserv-school-plan:ci iserv_school_plan
+      - name: Importe im Image pruefen
+        run: |
+          docker run --rm iserv-school-plan:ci python -c "import app.config, app.iserv, app.parsers, app.plan, app.mqtt, app.main; print('imports ok')"

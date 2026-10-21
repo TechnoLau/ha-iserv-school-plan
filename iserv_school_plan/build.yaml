@@ -1,8 +1,0 @@
-build_from:
-  amd64: python:3.12-alpine
-  aarch64: python:3.12-alpine
-  armv7: python:3.12-alpine
-labels:
-  org.opencontainers.image.title: IServ Stundenplan
-  org.opencontainers.image.description: IServ timetable to Home Assistant via MQTT
-  org.opencontainers.image.source: https://github.com/TechnoLau/ha-iserv-school-plan

@@ -1,0 +1,7 @@
+tests/
+conftest.py
+README.md
+DOCS.md
+CHANGELOG.md
+__pycache__/
+*.pyc

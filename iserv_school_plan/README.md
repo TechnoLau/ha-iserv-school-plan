@@ -44,10 +44,9 @@ YAML-Einträge in Home Assistant nötig.
 
 1. Dieses Repository zu GitHub pushen (oder forken).
 2. Die URLs in `repository.yaml` (Wurzelverzeichnis, eine Ebene über
-   `iserv_school_plan/`), `iserv_school_plan/config.yaml` und
-   `iserv_school_plan/build.yaml` zeigen auf
+   `iserv_school_plan/`) und `iserv_school_plan/config.yaml` zeigen auf
    `https://github.com/TechnoLau/ha-iserv-school-plan`. Bei einem Fork unter
-   anderem Account- oder Repo-Namen diese drei Stellen anpassen.
+   anderem Account- oder Repo-Namen diese beiden Stellen anpassen.
 3. Home Assistant: **Einstellungen → Add-ons → Add-on Store → ⋮ → Repositories →
    Repository hinzufügen** und die Repository-URL eintragen.
 4. Add-on installieren und starten.
@@ -255,9 +254,8 @@ iserv_school_plan/
 │   └── mqtt.py      # Discovery + Publish
 ├── tests/           # pytest-Suite (ohne Netzwerk, mit lokalem HTTP-Testserver)
 ├── config.yaml      # Add-on-Metadaten und Optionsschema
-├── build.yaml       # Basis-Images je Architektur
 ├── DOCS.md          # Kurzanleitung für die Add-on-Seite
-└── Dockerfile
+└── Dockerfile       # python:3.12-alpine + Abhängigkeiten
 ```
 
 Eine Ebene darüber liegt `repository.yaml` (Metadaten des Add-on-Repositories).

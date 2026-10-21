@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+- Build-Fix: `build.yaml` entfernt (beim Supervisor deprecated); der Dockerfile
+  nutzt jetzt direkt `python:3.12-alpine`, weil der Supervisor ohne
+  `build_from` mit `ghcr.io/home-assistant/base` baut – dort fehlt `pip`
+  (Fehler `pip: not found`, Exit-Code 127)
+
 ## 1.0.0
 
 - Erste Version des Add-ons „IServ Stundenplan“
