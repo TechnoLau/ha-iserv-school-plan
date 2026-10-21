@@ -21,8 +21,10 @@ from app.iserv import (
     _LoginFormParser,
     _accept_for,
     _auth_redirect_target,
+    _calendar_links,
     _clean_base_url,
     _detect_fields,
+    _html_summary,
     _looks_like_login_page,
     _meta_refresh_target,
     _origin,
@@ -769,4 +771,123 @@ def test_origin_header_uses_scheme_and_host() -> None:
     assert _origin("https://schule.de/iserv") == "https://schule.de"
     assert _origin("https://schule.de/iserv/timetable") == "https://schule.de"
     assert _origin("http://127.0.0.1:8080/iserv") == "http://127.0.0.1:8080"
+
+
+# --- iCal-Export der IServ-Stundenplanansicht --------------------------------
+
+GRID_WITHOUT_DATE_PAGE = """
+<html><head><title>Stundenplan - IServ</title></head><body>
+<table>
+  <tr><th>Stunde</th><th>Montag</th><th>Dienstag</th></tr>
+  <tr><td>1</td><td>Mathematik</td><td>Deutsch</td></tr>
+</table>
+<a href="/iserv/timetable/export/abc.ics">Stundenplan exportieren (iCal)</a>
+</body></html>
+"""
+
+EXPORT_ICS = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//IServ//Stundenplan//DE
+BEGIN:VEVENT
+UID:1@iserv
+DTSTART;TZID=Europe/Berlin:20261019T074500
+DTEND;TZID=Europe/Berlin:20261019T083000
+SUMMARY:Mathematik
+LOCATION:A1
+END:VEVENT
+END:VCALENDAR
+"""
+
+EXPORT_HITS: list[str] = []
+
+
+class ExportHandler(BaseHTTPRequestHandler):
+    """Testserver: /iserv/plan fehlt, /iserv/timetable bietet einen iCal-Export."""
+
+    def _send(
+        self, status: int, body: str, content_type: str = "text/html; charset=utf-8"
+    ) -> None:
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        EXPORT_HITS.append(self.path)
+        if self.path in ("/iserv/auth/login", "/iserv/"):
+            self._send(200, LOGIN_PAGE)
+        elif self.path == "/iserv/plan":
+            self._send(404, "not found")
+        elif self.path == "/iserv/timetable":
+            self._send(200, GRID_WITHOUT_DATE_PAGE)
+        elif self.path == "/iserv/timetable/export/abc.ics":
+            self._send(200, EXPORT_ICS, "text/calendar; charset=utf-8")
+        else:
+            self._send(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        data = parse_qs(self.rfile.read(length).decode("utf-8"))
+        valid = (
+            data.get("_username") == ["test"]
+            and data.get("_password") == ["geheim"]
+            and data.get("_csrf") == ["token123"]
+        )
+        if not valid:
+            self._send(200, LOGIN_PAGE)
+            return
+        self.send_response(302)
+        self.send_header("Location", "/iserv/")
+        self.send_header("Set-Cookie", "session=ok; Path=/")
+        self.end_headers()
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.fixture()
+def export_url():
+    """Startet den Testserver mit iCal-Export-Link."""
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), ExportHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    EXPORT_HITS.clear()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_calendar_export_link_is_used_when_page_has_no_rows(export_url: str) -> None:
+    """Ohne Datum im Wochengitter liefert der iCal-Export die Planzeiten."""
+    client = IservClient(
+        IservOptions(base_url=export_url, username="test", password="geheim")
+    )
+    dataset = client.fetch_dataset(default_year=2026)
+    lesson = dataset.days[date(2026, 10, 19)].lessons[0]
+    assert lesson.subject == "Mathematik"
+    assert lesson.start == time(7, 45)
+    assert client.last_url.endswith("/iserv/timetable/export/abc.ics")
+    assert "/iserv/timetable/export/abc.ics" in EXPORT_HITS
+
+
+def test_calendar_links_ignore_foreign_hosts_and_other_links() -> None:
+    html = (
+        '<a href="/iserv/timetable/export/x.ics">iCal</a>'
+        '<a href="https://fremd.example/x.ics">fremd</a>'
+        '<a href="/iserv/auth/logout">Abmelden</a>'
+    )
+    assert _calendar_links(html, "https://schule.de/iserv/timetable") == [
+        "https://schule.de/iserv/timetable/export/x.ics"
+    ]
+
+
+def test_html_summary_reports_table_structure() -> None:
+    summary = _html_summary(
+        "<table><tr><th>Montag<br>19.10.</th><th>Dienstag<br>20.10.</th></tr>"
+        "<tr><td>Mathematik</td><td>Deutsch</td></tr></table>"
+    )
+    assert "Wochengitter mit Datum" in summary
+    assert "Montag" in summary
+
 

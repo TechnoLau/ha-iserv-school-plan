@@ -22,6 +22,25 @@ CANCEL_RE = re.compile(
 DATE_RE = re.compile(r"\b(\d{1,2})\.\s?(\d{1,2})\.\s?(\d{2,4})\b")
 TIME_RE = re.compile(r"\b(\d{1,2})\s*[:.]\s*(\d{2})\b")
 PERIOD_RE = re.compile(r"^\s*(\d{1,2})\s*(?:[.\-/]\s*\d{1,2}\s*)?\.?\s*$")
+# Wochennamen der IServ-Stundenplanansicht (``Montag``, ``Mo``, ``Mo., 19.10.``).
+# Dieses Wochengitter hat *keine* Stunde/Zeit-Kopfzeile - es wird deshalb
+# getrennt von den Vertretungsplan-Tabellen erkannt.
+WEEKDAY_NAMES = (
+    "montag",
+    "dienstag",
+    "mittwoch",
+    "donnerstag",
+    "freitag",
+    "samstag",
+    "sonntag",
+)
+WEEKDAY_ABBR = {"mo": 0, "di": 1, "mi": 2, "do": 3, "fr": 4, "sa": 5, "so": 6}
+# Raumangaben in Gitterzellen (``A1``, ``R 204``, ``Raum 12``). Faecher und
+# Lehrernamen enthalten keine Ziffern und werden dadurch nicht als Raum gelesen.
+ROOM_RE = re.compile(r"^(?:raum\s*)?[A-Za-zÄÖÜäöü]{1,3}[\s\-.]?\d{1,3}[a-z]?$")
+CANCEL_STRONG_RE = re.compile(
+    r"f(?:ä|ae)llt\s+aus|entf(?:ä|ae)llt|entfall|ausfall|abgesagt", re.IGNORECASE
+)
 
 HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "period": ("stunde", "stunden", "std", "std.", "periode", "period"),
@@ -59,6 +78,10 @@ def extract_period(text: str) -> int | None:
         return None
     match = PERIOD_RE.match(text)
     if match:
+        return int(match.group(1))
+    match = re.match(r"^(\d{1,2})(?!\s*:)\s*(?:[.\-]|\s|$)", text)
+    if match:
+        # Gitterzellen der IServ-Stundenplanansicht: ``1 07:45 - 08:30``.
         return int(match.group(1))
     match = re.search(r"stunde\s*(\d{1,2})", text, re.IGNORECASE)
     if match:
@@ -132,6 +155,36 @@ def is_cancelled(*values: str | None) -> bool:
     return any(CANCEL_RE.search(normalize_text(value)) for value in values if value)
 
 
+def weekday_index(text: str | None) -> int | None:
+    """Wochentag einer Spaltenueberschrift (0 = Montag, 6 = Sonntag)."""
+    value = normalize_text(text).lower()
+    if not value:
+        return None
+    for index, name in enumerate(WEEKDAY_NAMES):
+        if name in value:
+            return index
+    match = re.match(r"^(mo|di|mi|do|fr|sa|so)\b", value)
+    if match:
+        return WEEKDAY_ABBR[match.group(1)]
+    return None
+
+
+def _grid_date(text: str | None, default_year: int | None) -> date | None:
+    """Datum einer Spaltenueberschrift - mit oder ohne Jahr.
+
+    IServ schreibt in der Wochenansicht ``Montag, 19.10.`` (ohne Jahr) oder
+    ``Montag, 19.10.2026``. Ohne Jahr gilt das Jahr des Abrufs.
+    """
+    found = find_date(text, default_year)
+    if found is not None:
+        return found
+    match = re.search(r"\b(\d{1,2})\.\s?(\d{1,2})\.", text or "")
+    if not match:
+        return None
+    year = default_year or datetime.now(TZ).year
+    return _build_date(int(match.group(1)), int(match.group(2)), year, year)
+
+
 def _unescape(value: str) -> str:
     return (
         value.replace("\\n", "\n")
@@ -194,6 +247,17 @@ def _parse_ics_datetime(value: str, params: dict[str, str]) -> datetime | date |
         return None
 
 
+def _int_attr(attrs, name: str) -> int:
+    """Liest ``rowspan``/``colspan`` einer Zelle (mindestens 1)."""
+    for key, value in attrs or ():
+        if key == name and value:
+            try:
+                return max(1, min(100, int(str(value).strip())))
+            except ValueError:
+                return 1
+    return 1
+
+
 class _TableCollector(HTMLParser):
     """Sammelt Tabellen inkl. der vorangehenden Datums-Ueberschrift."""
 
@@ -207,6 +271,7 @@ class _TableCollector(HTMLParser):
         self._row: dict | None = None
         self._cell: dict | None = None
         self._capture: list[str] | None = None
+        self._chunks: list[str] = []
         self._skip = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
@@ -221,18 +286,40 @@ class _TableCollector(HTMLParser):
             self._row = {"cells": []}
             self._stack[-1]["rows"].append(self._row)
         elif tag in ("td", "th") and self._row is not None:
-            self._cell = {"text": "", "header": tag == "th"}
+            self._cell = {
+                "text": "",
+                "header": tag == "th",
+                # Zeilenumbrueche getrennt halten: im Wochengitter steht in einer
+                # Zelle je Zeile eine Angabe (Fach, Lehrkraft, Raum).
+                "lines": [],
+                # Verbundene Zellen (Doppelstunden) verschieben sonst alle
+                # folgenden Spalten.
+                "rowspan": _int_attr(attrs, "rowspan"),
+                "colspan": _int_attr(attrs, "colspan"),
+            }
+            self._chunks = []
             self._row["cells"].append(self._cell)
         elif tag == "br" and self._cell is not None:
             self._cell["text"] += " "
+            self._flush_cell_line()
         elif tag in self.CONTEXT_TAGS and not self._stack:
             self._capture = []
+
+    def _flush_cell_line(self) -> None:
+        """Schliesst die aktuelle Zeile einer Tabellenzelle ab."""
+        if self._cell is None:
+            return
+        text = normalize_text("".join(self._chunks))
+        if text:
+            self._cell["lines"].append(text)
+        self._chunks = []
 
     def handle_endtag(self, tag: str) -> None:
         if tag in ("script", "style"):
             self._skip = max(0, self._skip - 1)
             return
         if tag in ("td", "th"):
+            self._flush_cell_line()
             self._cell = None
         elif tag == "tr":
             self._row = None
@@ -249,6 +336,7 @@ class _TableCollector(HTMLParser):
             return
         if self._cell is not None:
             self._cell["text"] += data
+            self._chunks.append(data)
         elif self._capture is not None:
             self._capture.append(data)
         elif not self._stack:
@@ -285,6 +373,204 @@ def _detect_header(rows: list[dict]) -> tuple[int, dict[str, int]] | None:
     return best
 
 
+def _detect_grid(
+    rows: list[dict], default_year: int | None
+) -> tuple[int, dict[int, date]] | None:
+    """Erkennt ein Wochengitter: Spaltenueberschriften mit Datum je Tag.
+
+    Die IServ-Stundenplanansicht hat keine Stunde/Zeit-Kopfzeile, sondern
+    Tage als Spalten (``Mo., 19.10.`` oder ``19.10.``). Ohne Datum in der
+    Ueberschrift laesst sich keine Stunde einem Tag zuordnen - dann wird das
+    Gitter bewusst nicht ausgewertet. Reine Datumsspalten werden nur akzeptiert,
+    wenn die erste Kopfzelle eine Stundenspalte ist (``Stunde``/``Std``).
+    """
+    best: tuple[int, dict[int, date]] | None = None
+    for index, row in enumerate(rows[:4]):
+        cells = row["cells"]
+        columns: dict[int, date] = {}
+        weekday_hits = 0
+        for position, cell in enumerate(cells):
+            day = _grid_date(cell["text"], default_year)
+            if day is None:
+                continue
+            if weekday_index(cell["text"]) is not None:
+                weekday_hits += 1
+            columns[position] = day
+        if len(columns) < 2:
+            continue
+        if weekday_hits < 1 and not (
+            cells and _match_field(cells[0]["text"]) in ("period", "time")
+        ):
+            continue
+        if best is None or len(columns) > len(best[1]):
+            best = (index, columns)
+    return best
+
+
+def _expand_rows(rows: list[dict]) -> list[list[dict | None]]:
+    """Setzt ``rowspan``/``colspan`` in ein rechteckiges Raster um.
+
+    Doppelstunden sind in IServ-Zeitplaenen verbundene Zellen. Ohne diese
+    Aufloesung waeren alle folgenden Spalten um eine Position verschoben.
+    """
+    grid: list[list[dict | None]] = []
+    spans: dict[int, tuple[dict, int]] = {}
+    for row in rows:
+        line: list[dict | None] = []
+        pending = iter(row["cells"])
+        next_cell = next(pending, None)
+        column = 0
+        while next_cell is not None or column in spans:
+            if column in spans:
+                cell, remaining = spans[column]
+                line.append(cell)
+                if remaining <= 1:
+                    del spans[column]
+                else:
+                    spans[column] = (cell, remaining - 1)
+                column += 1
+                continue
+            cell = next_cell
+            next_cell = next(pending, None)
+            rowspan = cell.get("rowspan") or 1
+            colspan = cell.get("colspan") or 1
+            for offset in range(colspan):
+                line.append(cell)
+                if rowspan > 1:
+                    spans[column + offset] = (cell, rowspan - 1)
+            column += colspan
+        grid.append(line)
+    return grid
+
+
+def _has_weekday_header(rows: list[dict]) -> bool:
+    """True, wenn eine der ersten Zeilen mehrere Wochentage als Spalten hat."""
+    for row in rows[:4]:
+        weekdays = [cell for cell in row["cells"] if weekday_index(cell["text"]) is not None]
+        if len(weekdays) >= 2:
+            return True
+    return False
+
+
+def _has_date_columns(rows: list[dict]) -> bool:
+    """True, wenn eine der ersten Zeilen mehrere Datumsspalten hat."""
+    for row in rows[:4]:
+        dated = [cell for cell in row["cells"] if find_date(cell["text"]) is not None]
+        if len(dated) >= 2:
+            return True
+    return False
+
+
+def _grid_cell_values(lines: list[str]) -> tuple[str, str, str]:
+    """Fach, Raum und Notiz aus den Zeilen einer Gitterzelle.
+
+    IServ schreibt je Zeile eine Angabe (Fach, Lehrkraft, Raum). Die erste
+    Zeile ist das Fach, eine Zeile mit Raummuster der Raum, der Rest die Notiz.
+    """
+    parts = [normalize_text(line) for line in lines or [] if normalize_text(line)]
+    if not parts:
+        return "", "", ""
+    subject, room, notes = parts[0], "", []
+    for part in parts[1:]:
+        if not room and ROOM_RE.match(part):
+            room = part
+        else:
+            notes.append(part)
+    return subject, room, ", ".join(notes)
+
+
+def _parse_grid(
+    rows: list[dict],
+    header_index: int,
+    columns: dict[int, date],
+    dataset: PlanDataset,
+) -> None:
+    """Liest eine Wochenansicht (Spalten = Tage) in das Dataset."""
+    first_day = min(columns)
+    for line in _expand_rows(rows[header_index + 1 :]):
+        if not line:
+            continue
+        head = " ".join(
+            normalize_text(cell["text"])
+            for cell in line[:first_day]
+            if cell is not None and normalize_text(cell["text"])
+        )
+        period = extract_period(head)
+        start, end = parse_time_range(head)
+        if period is None and start is None:
+            continue
+        for position, day in columns.items():
+            if position >= len(line) or line[position] is None:
+                continue
+            cell = line[position]
+            text = normalize_text(cell["text"])
+            if not text:
+                continue
+            subject, room, note = _grid_cell_values(cell.get("lines") or [text])
+            if not subject:
+                continue
+            cancelled = is_cancelled(note) or bool(
+                CANCEL_STRONG_RE.search(f"{subject} {text}")
+            )
+            dataset.add_lesson(
+                Lesson(
+                    period=period,
+                    start=start,
+                    end=end,
+                    subject=subject,
+                    room=room,
+                    cancelled=cancelled,
+                    note=note,
+                    date=day,
+                )
+            )
+
+
+def table_summary(text: str, limit: int = 3) -> str:
+    """Kurzfassung der Tabellenstruktur fuer Log und Fehlermeldung.
+
+    Ohne diese Angaben steht im Log nur "keine Spaltenueberschrift" - damit ist
+    nicht erkennbar, ob die Seite ein Wochengitter, eine JavaScript-Huelle oder
+    eine ganz andere Tabelle liefert.
+    """
+    collector = _TableCollector()
+    try:
+        collector.feed(text)
+        collector.close()
+    except Exception:  # pragma: no cover - defektes HTML darf nicht stoeren
+        return "Tabellen nicht lesbar"
+    if not collector.tables:
+        return "keine Tabelle"
+    parts: list[str] = []
+    for number, table in enumerate(collector.tables[:limit], start=1):
+        rows = table["rows"]
+        width = max((len(row["cells"]) for row in rows), default=0)
+        head = ""
+        weekday_header = False
+        dated = False
+        date_columns = False
+        for row in rows[:3]:
+            cells = [normalize_text(cell["text"]) for cell in row["cells"]]
+            cells = [cell for cell in cells if cell]
+            if len(cells) >= 2 and not head:
+                head = " | ".join(cells[:6])[:80]
+            if len([cell for cell in cells if find_date(cell) is not None]) >= 2:
+                date_columns = True
+            weekdays = [cell for cell in cells if weekday_index(cell) is not None]
+            if len(weekdays) >= 2:
+                weekday_header = True
+                dated = dated or any(_grid_date(cell, None) is not None for cell in weekdays)
+        description = f"{number}) {len(rows)} Zeilen x {width} Spalten"
+        if head:
+            description += f", Kopf: {head!r}"
+        if weekday_header:
+            description += ", Wochengitter " + ("mit Datum" if dated else "ohne Datum")
+        elif date_columns:
+            description += ", Datumsspalten"
+        parts.append(description)
+    return f"{len(collector.tables)} Tabellen: " + "; ".join(parts)
+
+
 def parse_html(
     text: str,
     source: str = "html",
@@ -297,12 +583,15 @@ def parse_html(
     collector.close()
 
     dataset = PlanDataset(source=source)
+    # Hinweise erst am Ende uebernehmen: nach einem erfolgreichen Gitter-Lauf
+    # sollen keine "ignoriert"-Meldungen im Status stehen.
+    skipped_tables = 0
     for table in collector.tables:
         rows = table["rows"]
         detected = _detect_header(rows)
         if not detected:
             if rows:
-                dataset.warnings.append("Tabelle ohne erkannte Spaltenueberschrift ignoriert")
+                skipped_tables += 1
             continue
         header_index, columns = detected
         table_date = find_last_date(table["context"], default_year)
@@ -346,6 +635,33 @@ def parse_html(
                     date=row_date,
                 )
             )
+
+    if not dataset.days:
+        # Zweiter Versuch: IServ-Stundenplanansicht (Spalten = Wochentage).
+        grid_warnings: list[str] = []
+        for table in collector.tables:
+            rows = table["rows"]
+            grid = _detect_grid(rows, default_year)
+            if grid is not None:
+                header_index, grid_columns = grid
+                _parse_grid(rows, header_index, grid_columns, dataset)
+                if dataset.days:
+                    break
+                grid_warnings.append("Wochengitter ohne verwertbare Zellen erkannt")
+            elif _has_weekday_header(rows):
+                grid_warnings.append(
+                    "Wochengitter ohne Datum in der Spaltenueberschrift ignoriert"
+                )
+            elif _has_date_columns(rows):
+                grid_warnings.append(
+                    "Tabelle mit Datumsspalten, aber ohne Stundenspalte ignoriert"
+                )
+        if not dataset.days:
+            if skipped_tables:
+                dataset.warnings.append(
+                    "Tabelle ohne erkannte Spaltenueberschrift ignoriert"
+                )
+            dataset.warnings.extend(grid_warnings)
 
     if not dataset.days:
         dataset.warnings.append("HTML enthielt keine auswertbaren Unterrichtszeilen")

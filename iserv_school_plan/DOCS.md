@@ -58,8 +58,16 @@ Repositories.
   nur 404er, fehlt die Freischaltung des Moduls für das Konto oder `iserv_url`
   zeigt auf den falschen Host; `iserv_url` bleibt dabei die Basisadresse
   (`https://schule.de`), `plan_url` bleibt leer.
-- Bei „Plan enthielt keine verwertbaren Daten“: `debug_dump: true` setzen, Add-on
-  neu starten und `/data/debug/plan_raw.*` prüfen. Meldet das Add-on „keine
+- Bei „Plan enthielt keine verwertbaren Daten“: Ab Version 1.0.8 nennt die
+  Meldung die Tabellenstruktur (`Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf:
+  'Stunde | Montag 19.10. | …', Wochengitter mit Datum`) und wertet die
+  Stundenplan-Wochenansicht (Wochentage als Spalten, Stunden als Zeilen,
+  verbundene Zellen für Doppelstunden) aus. Zusätzlich wird ein auf der Seite
+  verlinkter iCal-Export genutzt, wenn die HTML-Auswertung keine Zeilen liefert.
+  Meldet das Add-on „Wochengitter ohne Datum“, enthalten die Spaltenköpfe nur
+  Wochentage: dann die persönliche iCal-Export-Adresse aus IServ als `plan_url`
+  mit `plan_format: ics` eintragen. Sonst `debug_dump: true` setzen, Add-on neu
+  starten und `/data/debug/plan_raw.*` prüfen. Meldet das Add-on „keine
   HTML-Tabelle in der Antwort“, zeigt `plan_url` auf die JavaScript-Web-App von
   IServ – ab Version 1.0.4 werden automatisch `/iserv/plan` und
   `/iserv/timetable` als klassische Tabelle probiert; das Log nennt die URL, die

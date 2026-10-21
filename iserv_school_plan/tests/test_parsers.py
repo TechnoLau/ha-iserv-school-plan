@@ -15,6 +15,7 @@ from app.parsers import (
     parse_payload,
     parse_time,
     parse_time_range,
+    table_summary,
 )
 
 ICS_SAMPLE = """BEGIN:VCALENDAR
@@ -76,6 +77,29 @@ JSON_SAMPLE = """
     {"date": "2026-10-22", "is_school_day": false, "holiday_name": "Ferien"}
   ]
 }
+"""
+
+# IServ-Stundenplanansicht: Spalten = Wochentage, verbundene Zelle = Doppelstunde.
+GRID_SAMPLE = """
+<html><body>
+<h1>Stundenplan</h1>
+<table class="timetable">
+  <tr>
+    <th>Stunde</th>
+    <th>Montag<br>19.10.</th>
+    <th>Dienstag<br>20.10.</th>
+  </tr>
+  <tr>
+    <td>1<br>07:45 - 08:30</td>
+    <td>Mathematik<br>Frau Muster<br>A1</td>
+    <td rowspan="2">Deutsch<br>Herr Beispiel<br>B2</td>
+  </tr>
+  <tr>
+    <td>2<br>08:35 - 09:20</td>
+    <td>Englisch<br>Frau Test<br>---</td>
+  </tr>
+</table>
+</body></html>
 """
 
 
@@ -165,6 +189,67 @@ def test_html_without_tables_warns() -> None:
     dataset = parse_html("<html><body><p>Kein Plan</p></body></html>")
     assert dataset.days == {}
     assert dataset.warnings
+
+
+def test_parse_html_week_grid_with_dates() -> None:
+    """IServ-Stundenplanansicht: Tage als Spalten, Stunde in der Zeilenkopfzelle."""
+    dataset = parse_html(GRID_SAMPLE, default_year=2026)
+    # Nach erfolgreicher Auswertung keine "ignoriert"-Hinweise im Status.
+    assert dataset.warnings == []
+
+    monday = dataset.days[date(2026, 10, 19)]
+    by_period = {lesson.period: lesson for lesson in monday.lessons}
+    assert by_period[1].subject == "Mathematik"
+    assert by_period[1].start == time(7, 45)
+    assert by_period[1].end == time(8, 30)
+    assert by_period[1].room == "A1"
+    assert by_period[1].note == "Frau Muster"
+    assert by_period[2].subject == "Englisch"
+    assert by_period[2].room == ""
+
+    # Doppelstunde (rowspan) gilt fuer beide Stunden und verschiebt keine Spalte.
+    tuesday = dataset.days[date(2026, 10, 20)]
+    assert [lesson.period for lesson in tuesday.lessons] == [1, 2]
+    assert {lesson.subject for lesson in tuesday.lessons} == {"Deutsch"}
+    assert {lesson.room for lesson in tuesday.lessons} == {"B2"}
+
+
+def test_parse_html_week_grid_without_date_is_reported() -> None:
+    html = (
+        "<table><tr><th>Std</th><th>Montag</th><th>Dienstag</th></tr>"
+        "<tr><td>1</td><td>Mathematik</td><td>Deutsch</td></tr></table>"
+    )
+    dataset = parse_html(html)
+    assert dataset.days == {}
+    assert any("ohne Datum" in warning for warning in dataset.warnings)
+
+
+def test_parse_html_grid_with_date_columns_only() -> None:
+    """Manche Zeitplaene beschriften die Spalten nur mit Datum (ohne Wochentag)."""
+    html = (
+        "<table><tr><th>Stunde</th><th>19.10.2026</th><th>20.10.2026</th></tr>"
+        "<tr><td>1</td><td>Mathematik<br>A1</td><td>Deutsch<br>B2</td></tr></table>"
+    )
+    dataset = parse_html(html)
+    assert dataset.days[date(2026, 10, 19)].lessons[0].subject == "Mathematik"
+    assert dataset.days[date(2026, 10, 20)].lessons[0].subject == "Deutsch"
+
+
+def test_parse_html_date_table_without_period_column_is_reported() -> None:
+    html = (
+        "<table><tr><th>Termin</th><th>19.10.2026</th><th>20.10.2026</th></tr>"
+        "<tr><td>Wandertag</td><td>x</td><td>y</td></tr></table>"
+    )
+    dataset = parse_html(html)
+    assert dataset.days == {}
+    assert any("Datumsspalten" in warning for warning in dataset.warnings)
+
+
+def test_table_summary_describes_week_grid() -> None:
+    summary = table_summary(GRID_SAMPLE)
+    assert "Wochengitter mit Datum" in summary
+    assert "Montag" in summary
+    assert "3 Zeilen" in summary
 
 
 def test_html_without_table_hints_at_iserv_web_app() -> None:

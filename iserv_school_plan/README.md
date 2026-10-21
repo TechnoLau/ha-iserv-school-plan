@@ -260,7 +260,9 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
 | `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
 | `Plan-Abruf fehlgeschlagen (HTTP 404)` | Einer der Plan-Pfade existiert auf dieser IServ-Instanz nicht (typisch: Tabelle liegt unter `/iserv/timetable`, `/iserv/plan` ist abgeschaltet – oder umgekehrt). Ab 1.0.7 probiert das Add-on alle bekannten Pfade durch und nennt in `last_error` jede versuchte URL mit Status (`[Versuche: …/iserv/plan: HTTP 404; …/iserv/timetable: HTTP 200]`). Stehen dort ausschließlich 404er, ist das Modul für dieses Konto nicht freigeschaltet oder `iserv_url` zeigt auf den falschen Host |
-| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Die Meldung enthält eine Kurzfassung der Antwort (Länge, `<title>`, `<table>`, erste Skript-URLs). Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Ab 1.0.8 nennt die Meldung die **Tabellenstruktur** (`Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf: 'Stunde | Montag 19.10. | …', Wochengitter mit Datum`) und nutzt einen auf der Seite verlinkten iCal-Export. „`keine <table>`“ / nur Skript-URLs = JavaScript-Ansicht. Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `Wochengitter ohne Datum in der Spaltenueberschrift ignoriert` | Die Seite zeigt die Stundenplan-Woche, aber die Spaltenköpfe enthalten nur Wochentage („Montag“) ohne Datum – ohne Datum ordnet das Add-on keine Stunden zu, statt sie zu raten. Abhilfe: die persönliche iCal-Export-Adresse aus IServ (Stundenplan → Export) als `plan_url` eintragen und `plan_format: ics` setzen, oder in IServ die Ansicht mit Datumsangaben („19.10.“) wählen |
+| `Tabelle ohne erkannte Spaltenueberschrift ignoriert` (2×) | Die Seite enthält Tabellen, aber keine Vertretungsplan-Kopfzeile (`Stunde`/`Zeit`/`Fach`). Seit 1.0.8 wird stattdessen die Wochenansicht (Wochentage als Spalten) ausgewertet; bleibt es bei der Meldung, sagt der Zusatz `Wochengitter …` in derselben Zeile, was gefunden wurde |
 | `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ (neue Web-Oberfläche) leitete nach dem Login per Meta-Refresh/JavaScript weiter; ab 1.0.6 führt das Add-on diese Weiterleitung selbst aus. Bleibt die Meldung, `log_level: debug` setzen – dort steht das gefundene Weiterleitungsziel. Hilft das nicht, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
 | `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
@@ -318,10 +320,15 @@ Da IServ je nach Version und Schulkonfiguration unterschiedliche Export-Formate
 anbietet, ist `plan_url` frei konfigurierbar (bleibt sie leer, probiert das
 Add-on `/iserv/plan` und `/iserv/timetable`). Die Parser sind tolerant gegenüber
 Spaltennamen („Fach“, „Raum“, „Zeit“, „Art“, „Klasse“, …) und Uhrzeitformaten
-(`07:45 - 08:30`, `7:45`, `745`). Bei einem unbekannten Format:
+(`07:45 - 08:30`, `7:45`, `745`). Ab Version 1.0.8 wird auch die
+Stundenplan-Wochenansicht gelesen (Spalten = Wochentage mit Datum, Zeilen =
+Stunden, verbundene Zellen für Doppelstunden) sowie – wenn die HTML-Auswertung
+leer bleibt – ein auf der Seite verlinkter iCal-Export. Bei einem unbekannten
+Format:
 
 1. `debug_dump: true` setzen und das Add-on neu starten.
-2. `/data/debug/plan_raw.*` und `plan_raw.meta.json` prüfen.
+2. `/data/debug/plan_raw.*` und `plan_raw.meta.json` prüfen; die Fehlermeldung
+   nennt zusätzlich die Tabellenstruktur (`Tabellen: … Kopf: … Wochengitter …`).
 3. Bei Bedarf in `app/parsers.py` einen weiteren Parser ergänzen, in
    `detect_format`/`parse_payload` registrieren und in `tests/test_parsers.py`
    testen.

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.8
+
+- IServ-Stundenplanansicht wird ausgewertet: Liefert `/iserv/timetable` die
+  Wochenansicht (Spalten = Wochentage mit Datum, Zeilen = Stunden) statt einer
+  Vertretungsplan-Tabelle, liest das Add-on jetzt dieses Gitter - auch wenn die
+  Spalten nur ein Datum tragen (`19.10.`). Bisher endete der Abruf dort mit
+  „Tabelle ohne erkannte Spaltenueberschrift ignoriert“ und „Plan enthielt keine
+  verwertbaren Daten“
+- Verbundene Zellen (`rowspan`/`colspan`, z. B. Doppelstunden) werden korrekt
+  aufgeloest - ohne das waeren alle folgenden Tage um eine Spalte verschoben
+- Fach, Raum und Lehrkraft werden aus den Zeilen der Gitterzelle gelesen
+  (Fach = erste Zeile, Raum = Zeile mit Raummuster, Rest = Notiz); Uhrzeiten
+  kommen aus der Stundenspalte, sonst greift `period_times`
+- Wochengitter ohne Datum in der Spaltenueberschrift wird bewusst **nicht**
+  ausgewertet (sonst wuerden Stunden einem falschen Tag zugeordnet); das Log
+  sagt das jetzt ausdruecklich
+- iCal-Export als Ausweichweg: Enthaelt die Planseite einen Export-Link
+  (`.ics`, „Stundenplan exportieren“), nutzt das Add-on ihn automatisch, sobald
+  die HTML-Auswertung keine Zeilen liefert. Der Export enthaelt Uhrzeiten und
+  funktioniert auch bei einer JavaScript-Ansicht. Es werden nur Links auf dem
+  eigenen Host verfolgt
+- Fehlermeldungen nennen die Tabellenstruktur, z. B.
+  `2 Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf: 'Stunde | Montag 19.10. | …',
+  Wochengitter mit Datum`. Damit ist ohne `debug_dump` erkennbar, was die Seite
+  tatsaechlich liefert
+- `extract_period` liest auch kombinierte Kopfzellen wie `1 07:45 - 08:30`
+
 ## 1.0.7
 
 - Fix fuer `Plan-Abruf fehlgeschlagen (HTTP 404)`: Antwortet der erste Plan-Pfad

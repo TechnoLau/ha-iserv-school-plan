@@ -25,7 +25,7 @@ from urllib.request import (
     build_opener,
 )
 
-from .parsers import parse_payload
+from .parsers import detect_format, parse_payload, table_summary
 from .plan import PlanDataset
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +60,14 @@ AUTH_REDIRECT_MARKERS = (
 )
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _SCRIPT_RE = re.compile(r"<script[^>]+src=\"([^\"]+)\"", re.IGNORECASE)
+# iCal-Export der IServ-Stundenplanansicht ("Stundenplan exportieren"). Der
+# Export enthaelt Uhrzeiten und funktioniert auch dann, wenn die HTML-Ansicht
+# nur ein JavaScript-Geruest zeigt.
+_LINK_RE = re.compile(
+    r"<a\b[^>]*?href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ICAL_HREF_HINTS = (".ics", "/ical", "ical/", "format=ical", "export=ical")
 _WAIT_RE = re.compile(r'data-seconds="(\d+)"')
 _META_REFRESH_RE = re.compile(r"<meta[^>]*http-equiv=[\"']?refresh[\"']?[^>]*>", re.IGNORECASE)
 _META_CONTENT_RE = re.compile(
@@ -197,10 +205,37 @@ def _html_summary(html: str) -> str:
     parts = [f"{len(html)} Zeichen"]
     if title:
         parts.append(f"Titel {title!r}")
-    parts.append("<table> vorhanden" if "<table" in html.lower() else "keine <table>")
+    if "<table" in html.lower():
+        parts.append(table_summary(html))
+    else:
+        parts.append("keine <table>")
     if scripts:
         parts.append("Skripte: " + ", ".join(scripts))
     return "; ".join(parts)
+
+
+def _calendar_links(html: str, base_url: str, limit: int = 3) -> list[str]:
+    """Findet iCal-Export-Links auf einer Planseite.
+
+    Nur Links mit iCal-Merkmal in der Adresse (``.ics``, ``/ical``, ...) und nur
+    auf demselben Host werden zurueckgegeben - die Seite kann beliebige Links
+    enthalten (Abmelden, Hilfe, ...).
+    """
+    host = urlsplit(base_url).netloc.lower()
+    links: list[str] = []
+    for match in _LINK_RE.finditer(html or ""):
+        href = unescape(match.group(1)).strip()
+        if not href or href.lower().startswith(("javascript:", "mailto:", "#")):
+            continue
+        if not any(hint in href.lower() for hint in _ICAL_HREF_HINTS):
+            continue
+        url = urljoin(base_url, href)
+        if urlsplit(url).netloc.lower() != host or url in links:
+            continue
+        links.append(url)
+        if len(links) >= limit:
+            break
+    return links
 
 
 def _server_hint(err: HTTPError, body: str | None = None) -> str:
@@ -810,7 +845,48 @@ class IservClient:
                 else:
                     _LOGGER.info("Plantabelle automatisch gefunden: %s", url)
                 return dataset
+            export = self._try_calendar_export(text, final_url, default_year)
+            if export is not None:
+                return export
             _LOGGER.debug("Auch %s ohne Tabelle (%s)", url, _html_summary(text))
+        return None
+
+    def _try_calendar_export(
+        self, page: str, page_url: str, default_year: int | None
+    ) -> PlanDataset | None:
+        """Nutzt den iCal-Export-Link der Planseite als Datenquelle.
+
+        Die IServ-Stundenplanansicht bietet "Stundenplan exportieren" als iCal
+        an. Dieser Export enthaelt Uhrzeiten und funktioniert damit auch dann,
+        wenn die HTML-Ansicht nur ein JavaScript-Geruest oder ein Gitter ohne
+        Datumsangaben zeigt.
+        """
+        for link in _calendar_links(page, page_url):
+            if link in self._tried_urls:
+                continue
+            self._tried_urls.add(link)
+            try:
+                text, content_type, final_url = self._plan_request(link, ACCEPT_CALENDAR)
+            except (HTTPError, URLError, IservError) as err:
+                _LOGGER.debug("iCal-Export %s nicht abrufbar: %s", link, err)
+                continue
+            if detect_format(text, content_type) != "ics":
+                _LOGGER.debug("iCal-Export %s lieferte kein iCal (%s)", link, content_type)
+                continue
+            dataset = parse_payload(
+                text,
+                fmt="ics",
+                source=link,
+                klasse=self.options.klasse or None,
+                default_year=default_year,
+            )
+            if dataset.days:
+                self.last_raw = text
+                self.last_content_type = content_type
+                self.last_url = final_url
+                _LOGGER.info("Stundenplan aus dem iCal-Export gelesen: %s", link)
+                return dataset
+            _LOGGER.debug("iCal-Export %s enthielt keine Termine", link)
         return None
 
     def fetch_dataset(self, default_year: int | None = None) -> PlanDataset:
@@ -818,6 +894,12 @@ class IservClient:
         dataset = self._parse_dataset(text, content_type, default_year)
         if dataset.days:
             return dataset
+
+        export = self._try_calendar_export(
+            text, self.last_url or self.options.resolved_plan_url, default_year
+        )
+        if export is not None:
+            return export
 
         fallback = self._try_fallback(default_year)
         if fallback is not None:
