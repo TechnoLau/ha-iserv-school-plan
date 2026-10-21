@@ -47,6 +47,15 @@ Repositories.
 
 - Add-on-Log prüfen (`log_level: debug` für mehr Details).
 - Bei „Plan enthielt keine verwertbaren Daten“: `debug_dump: true` setzen, Add-on
-  neu starten und `/data/debug/plan_raw.*` prüfen.
+  neu starten und `/data/debug/plan_raw.*` prüfen. Meldet das Add-on „keine
+  HTML-Tabelle in der Antwort“, zeigt `plan_url` auf die JavaScript-Web-App von
+  IServ – dann die klassische Plantabelle (z. B. `/iserv/plan`) eintragen.
 - Erscheinen keine Entities: MQTT-Verbindung, Discovery-Prefix und
   Broker-Zugangsdaten kontrollieren.
+- „MQTT-Verbindung abgelehnt: Not authorized“: Die Ports in der
+  Mosquitto-Network-Karte und der Discovery-Prefix sind nicht die Ursache.
+  Mosquitto 7 nutzt den Dienst-Benutzer `addons` (`homeassistant` und `addons`
+  sind reserviert) und akzeptiert Home-Assistant-Benutzer sowie eigene `logins`.
+  Ab Version 1.0.3 lädt das Add-on die Zugangsdaten nach einem Fehler erneut
+  beim Supervisor nach; zusätzlich hilft ein Neustart des Mosquitto-Add-ons.
+

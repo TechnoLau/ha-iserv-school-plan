@@ -166,3 +166,9 @@ def test_html_without_tables_warns() -> None:
     assert dataset.days == {}
     assert dataset.warnings
 
+
+def test_html_without_table_hints_at_iserv_web_app() -> None:
+    dataset = parse_html('<html><body><div id="app"></div><script src="/iserv/app.js"></script></body></html>')
+    assert dataset.days == {}
+    assert any("JavaScript-Web-App" in warning for warning in dataset.warnings)
+

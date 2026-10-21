@@ -89,6 +89,38 @@ die Broker-Zugangsdaten beim Supervisor (`mqtt:want`) – MQTT-Benutzer und
 -passwort müssen dann nicht eingetragen werden. Für einen externen Broker
 `mqtt_host`, `mqtt_port` (und ggf. `mqtt_ssl`) sowie Zugangsdaten selbst setzen.
 
+### MQTT-Benutzer (Mosquitto-Add-on, Version 7)
+
+- Add-ons erreichen den Broker über das interne Docker-Netz
+  (`core-mosquitto:1883`). Die Ports in der **Network**-Karte des
+  Mosquitto-Add-ons (1883/1884/8883/8884) gelten nur für Geräte **außerhalb**
+  von Home Assistant – sie haben keinen Einfluss auf die Verbindung dieses
+  Add-ons.
+- Der Supervisor liefert die Zugangsdaten über `mqtt:provide`. Mosquitto 7
+  erzeugt dafür den Dienst-Benutzer `addons`; `homeassistant` und `addons` sind
+  reservierte Namen.
+- Seit Mosquitto 7 hängt der Broker an der Home-Assistant-Benutzerverwaltung:
+  MQTT-Clients können **Home-Assistant-Benutzer** verwenden (Einstellungen →
+  Personen → Benutzer) oder eigene `logins` in der Mosquitto-Konfiguration.
+- `mqtt_discovery_prefix` (`homeassistant`) betrifft nur die Topics und hat
+  nichts mit der Anmeldung zu tun.
+
+Meldet das Log `MQTT-Verbindung abgelehnt: Not authorized`, sind die
+Zugangsdaten veraltet oder ungültig. Ab Version 1.0.3 fragt das Add-on sie nach
+einem Fehlschlag erneut beim Supervisor ab (und nennt den verwendeten Benutzer).
+Hilft das nicht: Mosquitto-Add-on neu starten (schreibt Benutzer/Passwort neu)
+und – falls weiterhin nötig – einen eigenen Benutzer vergeben:
+
+1. Mosquitto-Add-on → Konfiguration → `logins` ergänzen:
+   ```yaml
+   logins:
+     - username: iserv
+       password: geheim
+   ```
+2. Diese Werte in den Optionen des IServ-Add-ons als `mqtt_username` und
+   `mqtt_password` eintragen.
+
+
 ### Ferien und Feiertage (`free_days`)
 
 Ein Eintrag pro Zeitraum, getrennt durch `;`:
@@ -223,7 +255,8 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | `Login fehlgeschlagen …` | Benutzername/Passwort prüfen; Schul-URL prüfen (`/iserv/auth/login`) |
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
 | `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
-| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. `debug_dump: true` aktivieren, Add-on neu starten und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Ab 1.0.3 nennt die Meldung „keine HTML-Tabelle in der Antwort“, wenn `plan_url` auf die JavaScript-Web-App zeigt – dann die klassische Plantabelle (`/iserv/plan`) verwenden. Sonst `debug_dump: true` aktivieren, Add-on neu starten und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
 | Zeiten wirken verschoben | Prüfen, ob IServ lokale Zeiten liefert; `period_times` ist nur ein Fallback |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | Schul-Zertifikat ist im Container nicht vertrauenswürdig; `verify_ssl: false` (nur wenn vertretbar) |

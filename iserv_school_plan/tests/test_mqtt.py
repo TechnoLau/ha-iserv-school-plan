@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from app.config import AddonOptions
-from app.mqtt import AVAILABILITY_TOPIC, STATE_TOPIC, MqttPublisher, discovery_messages
+from app.mqtt import (
+    AUTH_ERROR_LOG_LIMIT,
+    AVAILABILITY_TOPIC,
+    MAX_CREDENTIAL_REFRESHES,
+    STATE_TOPIC,
+    MqttPublisher,
+    discovery_messages,
+)
 
 
 def test_discovery_topics_and_payloads() -> None:
@@ -107,3 +115,123 @@ def test_publisher_deduplicates_state() -> None:
     publisher.publish_state(state)
     publisher.publish_state(dict(state))
     assert len(sent) == 1
+
+
+def test_auth_failure_refreshes_credentials_from_supervisor() -> None:
+    options = AddonOptions(mqtt_username="alt", mqtt_password="alt")
+    publisher = MqttPublisher(
+        options,
+        "1.0.3",
+        credentials_refresher=lambda: {"username": "addons", "password": "neu"},
+    )
+
+    class FakeClient:
+        credentials = None
+
+        def username_pw_set(self, username=None, password=None):
+            FakeClient.credentials = (username, password)
+
+    publisher._on_connect(FakeClient(), None, {}, 5)
+
+    assert options.mqtt_username == "addons"
+    assert options.mqtt_password == "neu"
+    assert FakeClient.credentials == ("addons", "neu")
+
+
+def test_auth_failure_with_paho2_reason_code_refreshes() -> None:
+    """paho-mqtt 2.x meldet 'Not authorized' als Code 135, nicht als 5."""
+
+    class ReasonCode:
+        value = 135
+
+        def __str__(self) -> str:
+            return "Not authorized"
+
+    options = AddonOptions(mqtt_username="alt", mqtt_password="alt")
+    publisher = MqttPublisher(
+        options,
+        "1.0.3",
+        credentials_refresher=lambda: {"username": "addons", "password": "neu"},
+    )
+
+    class FakeClient:
+        credentials = None
+
+        def username_pw_set(self, username=None, password=None):
+            FakeClient.credentials = (username, password)
+
+    publisher._on_connect(FakeClient(), None, {}, ReasonCode())
+
+    assert FakeClient.credentials == ("addons", "neu")
+
+
+def test_auth_failure_without_refresher_keeps_configured_credentials() -> None:
+    options = AddonOptions(mqtt_username="fest", mqtt_password="geheim")
+    publisher = MqttPublisher(options, "1.0.3")
+
+    publisher._on_connect(object(), None, {}, 5)
+
+    assert options.mqtt_username == "fest"
+    assert options.mqtt_password == "geheim"
+
+
+def test_auth_failure_ignores_unchanged_supervisor_credentials() -> None:
+    options = AddonOptions(mqtt_username="addons", mqtt_password="gleich")
+    publisher = MqttPublisher(
+        options,
+        "1.0.3",
+        credentials_refresher=lambda: {"username": "addons", "password": "gleich"},
+    )
+
+    class FakeClient:
+        called = False
+
+        def username_pw_set(self, username=None, password=None):
+            FakeClient.called = True
+
+    publisher._on_connect(FakeClient(), None, {}, 5)
+
+    assert FakeClient.called is False
+    assert options.mqtt_password == "gleich"
+
+
+def test_credential_refresh_is_limited() -> None:
+    calls: list[int] = []
+    publisher = MqttPublisher(
+        AddonOptions(),
+        "1.0.3",
+        credentials_refresher=lambda: calls.append(1) or {"username": "u", "password": "p"},
+    )
+
+    class FakeClient:
+        def username_pw_set(self, username=None, password=None):
+            return None
+
+    for _ in range(MAX_CREDENTIAL_REFRESHES + 4):
+        publisher._handle_connect_failure(FakeClient(), 5)
+
+    assert len(calls) == MAX_CREDENTIAL_REFRESHES
+
+
+def test_auth_error_logging_is_limited_and_reset_after_success(caplog) -> None:
+    publisher = MqttPublisher(AddonOptions(), "1.0.3")
+    caplog.set_level(logging.DEBUG, logger="app.mqtt")
+
+    for _ in range(6):
+        publisher._handle_connect_failure(object(), 5)
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR and "abgelehnt" in r.getMessage()]
+    assert len(errors) == AUTH_ERROR_LOG_LIMIT
+    warnings = [r for r in caplog.records if "schlaegt weiterhin fehl" in r.getMessage()]
+    assert len(warnings) == 1
+
+    published: list[tuple] = []
+
+    class FakeClient:
+        def publish(self, topic, payload, qos=0, retain=False):
+            published.append((topic, payload, qos, retain))
+
+    publisher._on_connect(FakeClient(), None, {}, 0)
+    assert publisher._auth_errors == 0
+    assert publisher._credential_refreshes == 0
+    assert published[0] == (AVAILABILITY_TOPIC, "online", 0, True)

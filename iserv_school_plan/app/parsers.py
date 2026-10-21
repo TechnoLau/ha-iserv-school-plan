@@ -349,6 +349,12 @@ def parse_html(
 
     if not dataset.days:
         dataset.warnings.append("HTML enthielt keine auswertbaren Unterrichtszeilen")
+        if "<table" not in text.lower():
+            dataset.warnings.append(
+                "keine HTML-Tabelle in der Antwort - plan_url zeigt vermutlich auf die "
+                "JavaScript-Web-App von IServ; bitte die klassische Plantabelle "
+                "verwenden (z. B. /iserv/plan)"
+            )
     return dataset
 
 

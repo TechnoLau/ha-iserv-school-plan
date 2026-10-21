@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+from collections.abc import Callable
 from urllib.request import Request, urlopen
 
 import paho.mqtt.client as mqtt
@@ -19,6 +20,11 @@ STATE_TOPIC = "iserv_school_plan/state"
 AVAILABILITY_TOPIC = "iserv_school_plan/availability"
 NODE_ID = "iserv_school_plan"
 SUPERVISOR_MQTT_URL = "http://supervisor/services/mqtt"
+# CONNACK-Codes fuer "bad user name or password" und "not authorized":
+# MQTT 3.1.1 nutzt 4/5, paho-mqtt 2.x liefert die v5-Codes 134/135.
+AUTH_ERROR_CODES = (4, 5, 134, 135)
+AUTH_ERROR_LOG_LIMIT = 3
+MAX_CREDENTIAL_REFRESHES = 3
 DEVICE = {
     "identifiers": [NODE_ID],
     "manufacturer": "IServ",
@@ -173,9 +179,17 @@ def supervisor_mqtt_config() -> dict | None:
 class MqttPublisher:
     """Verbindet sich mit dem Mosquitto-Broker und publiziert Discovery + State."""
 
-    def __init__(self, options: AddonOptions, version: str) -> None:
+    def __init__(
+        self,
+        options: AddonOptions,
+        version: str,
+        credentials_refresher: Callable[[], dict | None] | None = None,
+    ) -> None:
         self.options = options
         self.version = version
+        self._credentials_refresher = credentials_refresher
+        self._auth_errors = 0
+        self._credential_refreshes = 0
         self._client = self._build_client()
         self._last_state: dict | None = None
 
@@ -205,9 +219,10 @@ class MqttPublisher:
 
     def start(self) -> None:
         _LOGGER.info(
-            "Verbinde MQTT %s:%s (Discovery-Prefix %s)",
+            "Verbinde MQTT %s:%s (Benutzer %s, Discovery-Prefix %s)",
             self.options.mqtt_host,
             self.options.mqtt_port,
+            self.options.mqtt_username or "ohne",
             self.options.mqtt_discovery_prefix,
         )
         self._client.connect_async(self.options.mqtt_host, self.options.mqtt_port, keepalive=60)
@@ -230,10 +245,17 @@ class MqttPublisher:
         value = getattr(reason_code, "value", reason_code)
         return value == 0
 
+    @staticmethod
+    def _rc_value(reason_code):
+        value = getattr(reason_code, "value", reason_code)
+        return value if isinstance(value, int) else None
+
     def _on_connect(self, client, userdata, flags, reason_code, properties=None) -> None:
         if not self._rc_ok(reason_code):
-            _LOGGER.error("MQTT-Verbindung abgelehnt: %s", reason_code)
+            self._handle_connect_failure(client, reason_code)
             return
+        self._auth_errors = 0
+        self._credential_refreshes = 0
         _LOGGER.info("MQTT verbunden")
         client.publish(AVAILABILITY_TOPIC, "online", retain=True)
         for topic, payload in discovery_messages(
@@ -244,6 +266,69 @@ class MqttPublisher:
             client.publish(
                 STATE_TOPIC, json.dumps(self._last_state, ensure_ascii=False), qos=1, retain=True
             )
+
+    def _handle_connect_failure(self, client, reason_code) -> None:
+        """Fehlgeschlagene Anmeldung erklaeren und veraltete Daten erneuern."""
+        self._auth_errors += 1
+        code = self._rc_value(reason_code)
+        if code in AUTH_ERROR_CODES:
+            if self._auth_errors <= AUTH_ERROR_LOG_LIMIT:
+                _LOGGER.error(
+                    "MQTT-Verbindung abgelehnt: %s (Benutzer %r). Pruefe die "
+                    "Zugangsdaten: Mosquitto 7 akzeptiert Home-Assistant-Benutzer "
+                    "und die Logins im Mosquitto-Add-on (homeassistant/addons sind "
+                    "reserviert); alternativ mqtt_username/mqtt_password setzen.",
+                    reason_code,
+                    self.options.mqtt_username,
+                )
+            else:
+                _LOGGER.debug("MQTT-Verbindung weiterhin abgelehnt: %s", reason_code)
+            self._refresh_credentials(client)
+            if self._auth_errors == AUTH_ERROR_LOG_LIMIT + 1:
+                _LOGGER.warning(
+                    "MQTT-Anmeldung schlaegt weiterhin fehl - bitte mqtt_username/"
+                    "mqtt_password in den Add-on-Optionen pruefen oder das "
+                    "Mosquitto-Add-on neu starten"
+                )
+            return
+
+        if self._auth_errors <= AUTH_ERROR_LOG_LIMIT:
+            _LOGGER.error("MQTT-Verbindung abgelehnt: %s", reason_code)
+        else:
+            _LOGGER.debug("MQTT-Verbindung weiterhin abgelehnt: %s", reason_code)
+
+    def _refresh_credentials(self, client) -> None:
+        """Nach einem Auth-Fehler die Zugangsdaten neu beim Supervisor holen.
+
+        Die Dienst-Zugangsdaten (Mosquitto 7: Benutzer ``addons``) schreibt das
+        Broker-Add-on bei jedem Start neu in seine Passwortdatei und meldet sie
+        dem Supervisor. Dieses Add-on liest sie aber nur beim eigenen Start -
+        nach einem Neustart des Brokers kann es deshalb mit veralteten Daten
+        dauerhaft auf "Not authorized" laufen. Hier werden sie nachgeladen; der
+        naechste automatische Reconnect von paho nutzt sie unmittelbar.
+        """
+        if self._credentials_refresher is None:
+            return
+        if self._credential_refreshes >= MAX_CREDENTIAL_REFRESHES:
+            return
+        self._credential_refreshes += 1
+        config = self._credentials_refresher()
+        if not config:
+            return
+        username = config.get("username") or ""
+        password = config.get("password") or ""
+        if (username, password) == (self.options.mqtt_username, self.options.mqtt_password):
+            _LOGGER.debug("Supervisor liefert unveraenderte MQTT-Zugangsdaten")
+            return
+        self.options.mqtt_username = username
+        self.options.mqtt_password = password
+        if hasattr(client, "username_pw_set"):
+            client.username_pw_set(username or None, password or None)
+        _LOGGER.info(
+            "Neue MQTT-Zugangsdaten vom Supervisor uebernommen (Benutzer %r) - "
+            "naechster Reconnect nutzt sie",
+            username,
+        )
 
     def _on_disconnect(self, client, userdata, *args) -> None:
         _LOGGER.warning("MQTT-Verbindung getrennt - Reconnect laeuft")

@@ -17,7 +17,7 @@ from .iserv import AuthError, FetchError, IservClient, IservOptions
 from .mqtt import MqttPublisher, supervisor_mqtt_config
 from .plan import TZ, PlanDataset, apply_period_times, select_plan
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -49,7 +49,7 @@ def _aware(value: datetime | None) -> datetime | None:
 class Addon:
     def __init__(self, options: AddonOptions) -> None:
         self.options = options
-        self._apply_supervisor_mqtt(options)
+        self._mqtt_from_supervisor = self._apply_supervisor_mqtt(options)
         self.client = IservClient(
             IservOptions(
                 base_url=options.iserv_url,
@@ -62,7 +62,9 @@ class Addon:
                 verify_ssl=options.verify_ssl,
             )
         )
-        self.publisher = MqttPublisher(options, VERSION)
+        self.publisher = MqttPublisher(
+            options, VERSION, credentials_refresher=self._refresh_mqtt_credentials
+        )
         self.dataset: PlanDataset | None = None
         self.last_error: str | None = None
         self.last_attempt: datetime | None = None
@@ -70,24 +72,38 @@ class Addon:
 
     # ------------------------------------------------------------------ Cache
     @staticmethod
-    def _apply_supervisor_mqtt(options: AddonOptions) -> None:
-        """Beim Mosquitto-Add-on die Zugangsdaten vom Supervisor uebernehmen."""
+    def _apply_supervisor_mqtt(options: AddonOptions) -> bool:
+        """Beim Mosquitto-Add-on die Zugangsdaten vom Supervisor uebernehmen.
+
+        Rueckgabe ``True``, wenn Benutzername/Passwort vom Supervisor stammen -
+        nur dann werden sie bei einem Auth-Fehler erneut abgefragt.
+        """
         if options.mqtt_host not in ("", DEFAULT_MQTT_HOST):
-            return
+            return False
         config = supervisor_mqtt_config()
         if not config:
-            return
+            return False
         options.mqtt_host = config["host"]
         options.mqtt_port = config["port"]
         options.mqtt_ssl = config["ssl"]
-        if not options.mqtt_username:
+        from_supervisor = not options.mqtt_username
+        if from_supervisor:
             options.mqtt_username = config["username"]
             options.mqtt_password = options.mqtt_password or config["password"]
         _LOGGER.info(
-            "MQTT-Zugangsdaten vom Supervisor uebernommen (%s:%s)",
+            "MQTT-Zugangsdaten vom Supervisor uebernommen (%s:%s, Benutzer %s)",
             options.mqtt_host,
             options.mqtt_port,
+            options.mqtt_username or "-",
         )
+        return from_supervisor
+
+    def _refresh_mqtt_credentials(self) -> dict | None:
+        """Nach einem MQTT-Auth-Fehler die Supervisor-Zugangsdaten erneuern."""
+        if not self._mqtt_from_supervisor:
+            return None
+        _LOGGER.info("Frage MQTT-Zugangsdaten erneut beim Supervisor ab")
+        return supervisor_mqtt_config()
 
     def load_cache(self) -> None:
         if not CACHE_FILE.exists():

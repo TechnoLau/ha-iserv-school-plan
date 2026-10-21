@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.3
+
+- Diagnose: Bei `MQTT-Verbindung abgelehnt` steht jetzt der verwendete
+  MQTT-Benutzer im Log, dazu ein Hinweis auf die gültigen Zugangsdaten
+  (Mosquitto 7 akzeptiert Home-Assistant-Benutzer und die `logins` im
+  Mosquitto-Add-on; `homeassistant` und `addons` sind reserviert)
+- Fix: Nach einem MQTT-Auth-Fehler werden die Zugangsdaten erneut beim
+  Supervisor abgefragt und für den nächsten Reconnect übernommen. Bisher wurde
+  `/services/mqtt` nur beim Start gelesen – nach einem Neustart des
+  Mosquitto-Add-ons konnte das Add-on deshalb dauerhaft mit veralteten
+  Zugangsdaten („Not authorized“) hängen
+- MQTT-Fehler werden nicht mehr endlos wiederholt geloggt (max. 3×, danach
+  `debug`), inkl. einmaligem Hinweis auf die Optionen
+- Start-Log nennt den MQTT-Benutzer
+- Klarere Meldung, wenn die Plan-URL auf die JavaScript-Web-App von IServ zeigt
+  (keine HTML-Tabelle in der Antwort) – dann die klassische Plantabelle
+  (`/iserv/plan`) verwenden
+
 ## 1.0.2
 
 - Fix: Plan-Abruf endete nach erfolgreichem Login mit `HTTP 401`. Ursache war

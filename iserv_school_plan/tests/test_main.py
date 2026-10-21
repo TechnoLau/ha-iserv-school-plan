@@ -211,3 +211,45 @@ def test_explicit_mqtt_host_is_not_overridden(monkeypatch) -> None:
     assert options.mqtt_host == "broker.local"
     assert options.mqtt_username == "eigen"
     assert calls == []
+
+
+def test_refresh_mqtt_credentials_after_auth_error(monkeypatch) -> None:
+    responses = [
+        {"host": "core-mosquitto", "port": 1883, "username": "addons", "password": "alt", "ssl": False},
+        {"host": "core-mosquitto", "port": 1883, "username": "addons", "password": "neu", "ssl": False},
+    ]
+
+    def fake_config():
+        return responses.pop(0) if responses else None
+
+    monkeypatch.setattr(main_module, "supervisor_mqtt_config", fake_config)
+    addon = make_addon()
+
+    assert addon.options.mqtt_username == "addons"
+    assert addon.options.mqtt_password == "alt"
+    assert addon._refresh_mqtt_credentials() == {
+        "host": "core-mosquitto",
+        "port": 1883,
+        "username": "addons",
+        "password": "neu",
+        "ssl": False,
+    }
+
+
+def test_refresh_mqtt_credentials_not_done_for_custom_login(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "supervisor_mqtt_config",
+        lambda: {
+            "host": "core-mosquitto",
+            "port": 1883,
+            "username": "addons",
+            "password": "y",
+            "ssl": False,
+        },
+    )
+    addon = make_addon(mqtt_username="eigen", mqtt_password="geheim")
+
+    assert addon.publisher.options.mqtt_username == "eigen"
+    assert addon._refresh_mqtt_credentials() is None
+
