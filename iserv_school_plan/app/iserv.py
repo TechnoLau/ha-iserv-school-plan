@@ -242,6 +242,13 @@ def _payload_summary(text: str, content_type: str = "") -> str:
     return _html_summary(text)
 
 
+def _short_body(text: str, limit: int = 120) -> str:
+    """Einzeiliger Anfang einer Antwort - fuer Fehlermeldungen im Log."""
+    flat = re.sub(r"<[^>]+>", " ", text or "")
+    flat = re.sub(r"\s+", " ", flat).strip()
+    return flat[:limit]
+
+
 def _calendar_links(html: str, base_url: str, limit: int = 3) -> list[str]:
     """Findet iCal-Export-Links auf einer Planseite.
 
@@ -296,6 +303,12 @@ def _server_hint(err: HTTPError, body: str | None = None) -> str:
 ACCEPT_HTML = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 ACCEPT_CALENDAR = "text/calendar,text/plain;q=0.9,*/*;q=0.8"
 ACCEPT_JSON = "application/json,text/plain;q=0.9,*/*;q=0.8"
+# Fuer die JSON-Schnittstelle der Stundenplanansicht ist ``application/json``
+# genau falsch herum: IServ haelt das fuer einen API-Aufruf und antwortet ohne
+# API-Token mit HTTP 401 (siehe Kommentar oben). Der Browser fragt die
+# Schnittstelle mit ``Accept: */*`` ab - JSON wird am Inhalt erkannt, nicht am
+# Content-Type. Ohne diese Trennung blieb der Abruf stumm bei 401 haengen.
+ACCEPT_ANY = "*/*"
 USERNAME_HINTS = ("user", "login", "email", "mail", "name", "kennung")
 DEFAULT_USER_FIELD = "_username"
 DEFAULT_PASSWORD_FIELD = "_password"
@@ -946,31 +959,71 @@ class IservClient:
         )
         return [f"{base}?{urlencode({'filter': filter_json})}", base]
 
+    def _portal_variants(self) -> list[tuple[str, str, dict, str]]:
+        """Varianten des JSON-Abrufs: ``(Label, URL, Header, Accept)``.
+
+        IServ-Instanzen reagieren unterschiedlich auf ``X-Requested-With``:
+        Der Browser-Aufruf der Ansicht kommt je nach Version mit oder ohne
+        diesem Header. Beide Formen werden probiert; ``Accept`` bleibt immer
+        ``*/*`` (siehe :data:`ACCEPT_ANY`).
+        """
+        referer = self.last_url or self.options.resolved_plan_url
+        xhr = {"X-Requested-With": "XMLHttpRequest"}
+        if referer:
+            xhr["Referer"] = referer
+        plain = {"Referer": referer} if referer else {}
+        variants: list[tuple[str, str, dict, str]] = []
+        for position, url in enumerate(self._portal_data_urls()):
+            label = "data?filter" if position == 0 else "data"
+            variants.append((label, url, xhr, ACCEPT_ANY))
+            if position == 0:
+                variants.append((f"{label} ohne XHR", url, plain, ACCEPT_ANY))
+        return variants
+
     def _try_portal_json(self, default_year: int | None) -> PlanDataset | None:
         """Liest den Plan aus der JSON-Schnittstelle der Web-Oberflaeche.
 
         Die HTML-Ansicht der neuen IServ-Oberflaeche enthaelt oft nur die
-        Kopfzeilen der Wochentabelle - die Stunden laedt ``portal.js`` als JSON
-        nach. Ohne diesen Weg sieht der Plan im Browser vollstaendig aus, das
-        Add-on erhaelt aber keine einzige Zeile.
+        Kopfzeilen der Wochentabelle - die Stunden laedt das Portal-JavaScript
+        als JSON nach. Ohne diesen Weg sieht der Plan im Browser vollstaendig
+        aus, das Add-on erhaelt aber keine einzige Zeile.
+
+        Jeder Fehlversuch (HTTP-Status, Content-Type, Antwortanfang) landet in
+        ``_portal_hint`` und damit in der Fehlermeldung - sonst sieht ein 401
+        aus wie "keine Daten".
         """
-        headers = {"X-Requested-With": "XMLHttpRequest"}
-        for url in self._portal_data_urls():
-            if url in self._tried_urls:
+        notes: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for label, url, headers, accept in self._portal_variants():
+            key = (url, headers.get("X-Requested-With") or "")
+            if key in seen:
                 continue
+            seen.add(key)
             self._tried_urls.add(url)
             try:
-                text, content_type, final_url = self._plan_request(
-                    url, ACCEPT_JSON, headers
+                text, content_type, final_url = self._plan_request(url, accept, headers)
+            except HTTPError as err:
+                body = ""
+                try:
+                    body = err.read().decode("utf-8", errors="replace")
+                except (OSError, ValueError):  # pragma: no cover - Body nicht lesbar
+                    body = ""
+                notes.append(f"{label}: HTTP {err.code} {_short_body(body, 80)}".strip())
+                _LOGGER.debug(
+                    "IServ-JSON %s nicht abrufbar: HTTP %s %s", url, err.code, body[:200]
                 )
-            except (HTTPError, URLError, IservError) as err:
+                continue
+            except (URLError, IservError) as err:
+                notes.append(f"{label}: {err}")
                 _LOGGER.debug("IServ-JSON %s nicht abrufbar: %s", url, err)
                 continue
             if detect_format(text, content_type) != "json":
+                notes.append(
+                    f"{label}: {content_type or 'ohne Content-Type'} "
+                    f"({len(text)} Zeichen: {_short_body(text, 60)})"
+                )
                 _LOGGER.debug(
-                    "IServ-JSON %s lieferte kein JSON (Content-Type %s)",
-                    url,
-                    content_type,
+                    "IServ-JSON %s lieferte kein JSON (Content-Type %s)", url, content_type
                 )
                 continue
             dataset = PlanDataset(source=url)
@@ -990,8 +1043,10 @@ class IservClient:
                     "Stundenplan aus der IServ-JSON-Schnittstelle gelesen: %s", url
                 )
                 return dataset
-            self._portal_hint = json_summary(text)
-            _LOGGER.debug("IServ-JSON %s ohne Stunden (%s)", url, self._portal_hint)
+            notes.append(f"{label}: JSON {json_summary(text)}")
+            _LOGGER.debug("IServ-JSON %s ohne Stunden (%s)", url, notes[-1])
+        if notes:
+            self._portal_hint = "; ".join(notes)[:600]
         return None
 
     def fetch_dataset(self, default_year: int | None = None) -> PlanDataset:

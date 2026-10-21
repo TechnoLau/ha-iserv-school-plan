@@ -379,3 +379,57 @@ def test_json_summary_names_keys_without_text_values() -> None:
     assert "Mathematik" not in summary
     assert "<str 10>" in summary
 
+
+def test_parse_portal_json_nested_rooms_and_teachers() -> None:
+    """Echte Portal-Form: Fach/Raum/Lehrkraft als Objekte bzw. Listen davon."""
+    text = json.dumps(
+        {
+            "data": [
+                {
+                    "type": "lesson",
+                    "data": {
+                        "id": 4711,
+                        "date": "2026-10-19",
+                        "lesson": 2,
+                        "startTime": "08:35",
+                        "endTime": "09:20",
+                        "subject": {"name": "Deutsch"},
+                        "rooms": [{"name": "B2"}],
+                        "teachers": [{"name": "Frau Muster"}],
+                        "info": "Klausur",
+                    },
+                }
+            ],
+            "config": {"week": "A"},
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    lesson = dataset.days[date(2026, 10, 19)].lessons[0]
+    assert lesson.period == 2
+    assert lesson.subject == "Deutsch"
+    assert lesson.room == "B2"
+    assert lesson.start == time(8, 35)
+    assert lesson.note == "Frau Muster, Klausur"
+    assert dataset.warnings == []
+
+
+def test_parse_portal_json_grid_uses_branch_key_as_period() -> None:
+    """Gitterform: ``{"2026-10-19": {"3": {"fach": ...}}}``."""
+    text = json.dumps(
+        {"week": {"2026-10-19": {"3": {"fach": "Physik", "raum": "C3"}}}}
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    lesson = dataset.days[date(2026, 10, 19)].lessons[0]
+    assert lesson.period == 3
+    assert lesson.subject == "Physik"
+    assert lesson.room == "C3"
+
+
+def test_parse_portal_json_period_grid_without_subject_is_ignored() -> None:
+    """Das Zeitraster (``"3": {"start": ...}``) ist keine Unterrichtsstunde."""
+    text = json.dumps(
+        {"2026-10-19": {"3": {"start": "09:30", "end": "10:15"}}}
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    assert dataset.days == {}
+

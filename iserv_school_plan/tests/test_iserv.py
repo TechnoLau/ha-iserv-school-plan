@@ -919,12 +919,17 @@ PORTAL_JSON = json.dumps(
     }
 )
 
-PORTAL_STATE: dict[str, str] = {"body": PORTAL_JSON}
-PORTAL_HITS: list[tuple[str, str]] = []
+PORTAL_STATE: dict[str, object] = {"body": PORTAL_JSON, "deny": False}
+PORTAL_HITS: list[tuple[str, str, str]] = []
 
 
 class PortalHandler(BaseHTTPRequestHandler):
-    """Testserver: HTML nur Geruest, Stunden kommen aus ``timetable/data``."""
+    """Testserver: HTML nur Geruest, Stunden kommen aus ``timetable/data``.
+
+    Der Server verhaelt sich wie IServ: Enthaelt ``Accept`` ``application/json``,
+    gilt die Anfrage als API-Aufruf ohne Token und wird mit HTTP 401
+    abgewiesen - unabhaengig von der Sitzung.
+    """
 
     def _send(
         self, status: int, body: str, content_type: str = "text/html; charset=utf-8"
@@ -937,7 +942,20 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
-        PORTAL_HITS.append((self.path, self.headers.get("X-Requested-With") or ""))
+        accept = self.headers.get("Accept") or ""
+        PORTAL_HITS.append(
+            (self.path, self.headers.get("X-Requested-With") or "", accept)
+        )
+        if PORTAL_STATE["deny"] and self.path.startswith("/iserv/timetable/data"):
+            self._send(401, "{}", "application/json; charset=utf-8")
+            return
+        if "application/json" in accept.lower():
+            self._send(
+                401,
+                json.dumps({"message": "API token required"}),
+                "application/json; charset=utf-8",
+            )
+            return
         if self.path in ("/iserv/auth/login", "/iserv/"):
             self._send(200, LOGIN_PAGE)
         elif self.path == "/iserv/plan":
@@ -945,7 +963,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         elif self.path == "/iserv/timetable":
             self._send(200, PORTAL_PAGE)
         elif self.path.startswith("/iserv/timetable/data"):
-            self._send(200, PORTAL_STATE["body"], "application/json; charset=utf-8")
+            self._send(200, str(PORTAL_STATE["body"]), "application/json; charset=utf-8")
         else:
             self._send(404, "not found")
 
@@ -976,6 +994,7 @@ def portal_url():
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     PORTAL_HITS.clear()
     PORTAL_STATE["body"] = PORTAL_JSON
+    PORTAL_STATE["deny"] = False
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
     httpd.server_close()
@@ -995,6 +1014,10 @@ def test_portal_json_is_used_when_page_is_javascript_shell(portal_url: str) -> N
     assert data_hits, "JSON-Schnittstelle wurde nicht abgefragt"
     assert "filter=" in data_hits[0][0]
     assert data_hits[0][1] == "XMLHttpRequest"
+    # IServ weist ``application/json`` als API-Aufruf ab (HTTP 401) - der
+    # Abruf muss deshalb wie der Browser mit ``*/*`` kommen.
+    assert data_hits[0][2] == "*/*"
+    assert not [hit for hit in data_hits if "application/json" in hit[2].lower()]
 
 
 def test_portal_json_filter_covers_today() -> None:
@@ -1022,6 +1045,22 @@ def test_portal_json_without_lessons_reports_structure(portal_url: str) -> None:
     assert "/iserv/timetable/data" in message
     assert "[JSON:" in message
     assert "config" in message
+
+
+def test_portal_json_denied_by_server_reports_status(portal_url: str) -> None:
+    """HTTP 401 auf ``data`` landet sichtbar in der Fehlermeldung.
+
+    Vor 1.0.10 stand bei einer 401-Antwort nur "keine verwertbaren Daten" im
+    Log - der eigentliche Grund war nicht erkennbar.
+    """
+    PORTAL_STATE["deny"] = True
+    client = IservClient(IservOptions(base_url=portal_url, username="test", password="geheim"))
+    with pytest.raises(FetchError) as error:
+        client.fetch_dataset(default_year=2026)
+    message = str(error.value)
+    assert "[JSON:" in message
+    assert "HTTP 401" in message
+    assert "data?filter" in message
 
 
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.10
+
+- Fehler aus 1.0.9 behoben: Der JSON-Abruf schickte `Accept: application/json`.
+  IServ haelt das fuer einen API-Aufruf ohne Token und antwortet mit HTTP 401 -
+  der Abruf endete deshalb still ohne Daten (im Log stand nur „Plan enthielt
+  keine verwertbaren Daten“). Der Endpunkt wird jetzt wie im Browser mit
+  `Accept: */*` abgefragt; JSON wird am Inhalt erkannt, nicht am Content-Type.
+  Zusaetzlich werden `Referer` und - als zweite Variante - der Aufruf ohne
+  `X-Requested-With` probiert, weil sich die Instanzen hier unterscheiden
+- Jeder Fehlversuch der JSON-Schnittstelle steht jetzt in der Fehlermeldung:
+  `[JSON: data?filter: HTTP 401 {…}; data: …]` - HTTP-Status, Content-Type,
+  Laenge und Antwortanfang. Ein 401/403/404 ist damit sofort als solcher
+  erkennbar statt als „keine Daten“
+- JSON-Auswertung toleranter: Raeume/Lehrkraefte als Listen von Objekten
+  (`"rooms": [{"name": "A1"}]`), Mehrzahl-Schluessel (`subjects`, `teachers`),
+  Zeitfeld `time`/`zeit`, und Gitterform `{"2026-10-19": {"3": {"fach": …}}}`
+  (Stundennummer aus dem Zweig-Schluessel). Das Zeitraster bleibt dabei
+  unberuecksichtigt
+
 ## 1.0.9
 
 - Neue Datenquelle: die JSON-Schnittstelle der IServ-Stundenplanansicht

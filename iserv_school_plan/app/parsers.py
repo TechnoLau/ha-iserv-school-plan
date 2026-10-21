@@ -783,12 +783,48 @@ def parse_json(text: str, source: str = "json") -> PlanDataset:
 # deshalb wird ueber Aliase gesucht statt ueber ein festes Schema.
 PORTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "date": ("date", "datum", "tag", "day", "startdate", "datefrom"),
-    "start": ("start", "beginn", "begin", "starttime", "timefrom", "uhrzeit"),
+    "start": (
+        "start",
+        "beginn",
+        "begin",
+        "starttime",
+        "timefrom",
+        "uhrzeit",
+        "time",
+        "zeit",
+    ),
     "end": ("end", "ende", "endtime", "timeto"),
     "period": ("period", "stunde", "stunden", "lesson", "hour", "stundennummer", "periode"),
-    "subject": ("subject", "fach", "fachname", "subjectname", "unterricht", "lessonname", "title"),
-    "room": ("room", "raum", "raumname", "roomname", "location", "ort"),
-    "teacher": ("teacher", "lehrer", "lehrkraft", "teachername", "lehrername"),
+    "subject": (
+        "subject",
+        "subjects",
+        "fach",
+        "faecher",
+        "fachname",
+        "subjectname",
+        "unterricht",
+        "lessonname",
+        "title",
+    ),
+    "room": (
+        "room",
+        "rooms",
+        "raum",
+        "raeume",
+        "raumname",
+        "roomname",
+        "location",
+        "ort",
+    ),
+    "teacher": (
+        "teacher",
+        "teachers",
+        "lehrer",
+        "lehrkraft",
+        "lehrkraefte",
+        "teachername",
+        "lehrername",
+    ),
     "note": ("note", "notes", "hinweis", "info", "bemerkung", "comment", "description"),
     "cancelled": (
         "cancelled",
@@ -900,8 +936,23 @@ def _portal_time(value) -> time | None:
     return parse_time(text)
 
 
+def _portal_period_key(key) -> int | None:
+    """Stundennummer aus einem Zweig-Schluessel (``"3": {...}``)."""
+    if isinstance(key, bool):
+        return None
+    if isinstance(key, int):
+        return key if 1 <= key <= 20 else None
+    if isinstance(key, str) and key.strip().isdigit():
+        value = int(key.strip())
+        return value if 1 <= value <= 20 else None
+    return None
+
+
 def _portal_lesson(
-    node: dict, day: date | None, default_year: int | None
+    node: dict,
+    day: date | None,
+    default_year: int | None,
+    context_period: int | None = None,
 ) -> Lesson | None:
     """Ein Eintrag als Unterrichtsstunde - oder ``None``, wenn es keine ist."""
     if day is None:
@@ -912,6 +963,10 @@ def _portal_lesson(
     if not re.search(r"[^\W\d_]", subject):
         return None
     period = extract_period(_portal_value(found.get("period")))
+    if period is None:
+        # Gitterform: ``"2026-10-19": {"3": {"fach": ...}}`` - die Stunde steht
+        # im Schluessel des Zweigs.
+        period = context_period
     start = _portal_time(found.get("start"))
     if period is None and start is None:
         return None
@@ -943,6 +998,7 @@ def _walk_portal(
     default_year: int | None,
     lessons: list[Lesson],
     seen: set[tuple],
+    context_period: int | None = None,
     depth: int = 0,
 ) -> None:
     """Sucht rekursiv nach Stunden; Datum kann am Eintrag oder am Zweig haengen."""
@@ -950,12 +1006,14 @@ def _walk_portal(
         return
     if isinstance(node, list):
         for item in node:
-            _walk_portal(item, context_day, default_year, lessons, seen, depth + 1)
+            _walk_portal(
+                item, context_day, default_year, lessons, seen, context_period, depth + 1
+            )
         return
     if not isinstance(node, dict):
         return
     own_day = _portal_date(_portal_lookup(node).get("date"), default_year) or context_day
-    lesson = _portal_lesson(node, own_day, default_year)
+    lesson = _portal_lesson(node, own_day, default_year, context_period)
     if lesson is not None:
         signature = (
             lesson.date,
@@ -974,7 +1032,16 @@ def _walk_portal(
         if not isinstance(value, (dict, list)):
             continue
         child_day = _portal_date(key, default_year) if isinstance(key, str) else None
-        _walk_portal(value, child_day or own_day, default_year, lessons, seen, depth + 1)
+        child_period = _portal_period_key(key)
+        _walk_portal(
+            value,
+            child_day or own_day,
+            default_year,
+            lessons,
+            seen,
+            child_period if child_period is not None else context_period,
+            depth + 1,
+        )
 
 
 def parse_portal_json(
