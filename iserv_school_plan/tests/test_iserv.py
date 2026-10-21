@@ -20,8 +20,11 @@ from app.iserv import (
     IservOptions,
     _LoginFormParser,
     _accept_for,
+    _auth_redirect_target,
+    _clean_base_url,
     _detect_fields,
     _looks_like_login_page,
+    _meta_refresh_target,
 )
 
 LOGIN_PAGE = """
@@ -188,6 +191,131 @@ def maintenance_url() -> str:
 def server_url() -> str:
     SEEN_ACCEPTS.clear()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+# --- Neue IServ-Version: Login endet auf einer OIDC-Zwischenseite ------------
+
+OIDC_LOGIN_PAGE = """
+<html><body>
+<form id="login-form" action="/iserv/auth/login" method="post">
+  <input type="hidden" name="_csrf" value="token123">
+  <input type="text" name="_username" value="">
+  <input type="password" name="_password" value="">
+</form>
+</body></html>
+"""
+
+OIDC_HOME_PAGE = "<html><body><h1>Startseite</h1></body></html>"
+
+OIDC_META_PAGE = """
+<html><head>
+<meta http-equiv="refresh" content="0;url='/iserv/app/authentication/redirect?code=meta123'">
+<script type="text/javascript" src="/iserv/auth/static/js/redirect.b6702d62.js"></script>
+<title>IServ - ebg-kiel.eu</title></head>
+<body><div id="redirect-text" class="hidden">Sie werden weitergeleitet ...</div></body></html>
+"""
+
+OIDC_JS_PAGE = """
+<html><head>
+<script type="text/javascript" src="/iserv/auth/static/js/redirect.b6702d62.js"></script>
+<script>window.location.replace("/iserv/app/authentication/redirect?code=js123");</script>
+<title>IServ - ebg-kiel.eu</title></head>
+<body><div id="redirect-text" class="hidden">Sie werden weitergeleitet ...</div></body></html>
+"""
+
+OIDC_STUCK_PAGE = """
+<html><head>
+<script type="text/javascript" src="/iserv/auth/static/js/redirect.b6702d62.js"></script>
+</head><body><div id="redirect-text">Bitte warten ...</div></body></html>
+"""
+
+OIDC_MODE = "meta"
+OIDC_HITS: list[str] = []
+
+
+class OidcHandler(BaseHTTPRequestHandler):
+    """Bildet den IServ-Login der neuen Web-Oberflaeche nach (OIDC-Kette)."""
+
+    def _send(
+        self,
+        status: int,
+        body: str,
+        content_type: str = "text/html; charset=utf-8",
+        extra_headers: dict | None = None,
+    ) -> None:
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _redirect(self, location: str, cookie: str | None = None) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+
+    def _has_session(self) -> bool:
+        return "iserv_session=ok" in (self.headers.get("Cookie") or "")
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        OIDC_HITS.append(self.path)
+        if self.path in ("/iserv/auth/login", "/iserv/"):
+            self._send(200, OIDC_LOGIN_PAGE)
+        elif self.path.startswith("/iserv/auth/home"):
+            self._send(200, OIDC_HOME_PAGE)
+        elif self.path.startswith("/iserv/plan"):
+            if not self._has_session():
+                self._redirect("/iserv/auth/auth?_iserv_app_url=%2Fiserv%2Fplan&client_id=abc")
+                return
+            self._send(200, PLAN_PAGE)
+        elif self.path.startswith("/iserv/auth/auth"):
+            page = {
+                "meta": OIDC_META_PAGE,
+                "js": OIDC_JS_PAGE,
+                "stuck": OIDC_STUCK_PAGE,
+            }[OIDC_MODE]
+            self._send(200, page)
+        elif self.path.startswith("/iserv/app/authentication/redirect"):
+            # Erst dieser Aufruf setzt die Sitzung der Web-Oberflaeche.
+            self._redirect("/iserv/plan", cookie="iserv_session=ok; Path=/")
+        else:
+            self._send(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        data = parse_qs(self.rfile.read(length).decode("utf-8"))
+        valid = (
+            data.get("_username") == ["test"]
+            and data.get("_password") == ["geheim"]
+            and data.get("_csrf") == ["token123"]
+        )
+        if valid:
+            self._redirect("/iserv/auth/auth?_iserv_app_url=%2Fiserv%2Fplan", "classic=ok; Path=/")
+        else:
+            self._send(200, OIDC_LOGIN_PAGE)
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.fixture()
+def oidc_url() -> str:
+    global OIDC_MODE
+    OIDC_MODE = "meta"
+    OIDC_HITS.clear()
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), OidcHandler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
@@ -399,3 +527,95 @@ def test_unauthorized_plan_reports_details(server_url: str) -> None:
     assert "/plan-noauth" in message
     assert "WWW-Authenticate" in message
     assert "token required" in message
+
+
+# --- OIDC-Login der neuen IServ-Version -------------------------------------
+
+
+def test_login_follows_oidc_redirect_page(oidc_url: str) -> None:
+    """Login endet auf der Auth-Zwischenseite (Meta-Refresh) - sie wird ausgefuehrt."""
+    client = IservClient(
+        IservOptions(base_url=oidc_url, username="test", password="geheim")
+    )
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/plan")
+    assert any("authentication/redirect" in hit for hit in OIDC_HITS)
+
+
+def test_login_follows_oidc_redirect_from_script(oidc_url: str) -> None:
+    global OIDC_MODE
+    OIDC_MODE = "js"
+    client = IservClient(
+        IservOptions(base_url=oidc_url, username="test", password="geheim")
+    )
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/plan")
+
+
+def test_stuck_oidc_redirect_reports_auth_error(oidc_url: str) -> None:
+    global OIDC_MODE
+    OIDC_MODE = "stuck"
+    client = IservClient(
+        IservOptions(base_url=oidc_url, username="test", password="geheim")
+    )
+    with pytest.raises(AuthError) as error:
+        client.fetch_dataset(default_year=2026)
+    assert "Sitzung wurde nicht uebernommen" in str(error.value)
+
+
+def test_plan_page_auth_redirect_is_completed(oidc_url: str) -> None:
+    """Ohne Sitzung der Web-Oberflaeche antwortet der Plan mit der Auth-Seite."""
+    client = IservClient(
+        IservOptions(base_url=oidc_url, username="test", password="geheim")
+    )
+    client.login()
+    for cookie in list(client._jar):
+        if cookie.name == "iserv_session":
+            client._jar.clear(cookie.domain, cookie.path, cookie.name)
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/plan")
+
+
+def test_meta_refresh_variants_are_parsed() -> None:
+    quoted = (
+        '<meta http-equiv="refresh" '
+        "content=\"0;url='/iserv/app/authentication/redirect?code=abc'\">"
+    )
+    assert _meta_refresh_target(quoted, "https://schule.de/x") == (
+        "https://schule.de/iserv/app/authentication/redirect?code=abc"
+    )
+    plain = '<meta http-equiv="refresh" content="5; /iserv/auth/logout?finished=1">'
+    assert _meta_refresh_target(plain, "https://schule.de/iserv/") == (
+        "https://schule.de/iserv/auth/logout?finished=1"
+    )
+    escaped = (
+        '<meta http-equiv="refresh" '
+        'content="0;url=/iserv/app/authentication/redirect?code=abc&amp;state=xyz">'
+    )
+    assert _meta_refresh_target(escaped, "https://schule.de/iserv/auth/auth") == (
+        "https://schule.de/iserv/app/authentication/redirect?code=abc&state=xyz"
+    )
+    assert _meta_refresh_target("<html><body>nichts</body></html>", "https://schule.de") == ""
+
+
+def test_auth_redirect_target_from_script() -> None:
+    page = '<html><script>window.location.href = "/iserv/app/authentication/redirect?code=x";</script></html>'
+    assert _auth_redirect_target(page, "https://schule.de/iserv/auth/auth") == (
+        "https://schule.de/iserv/app/authentication/redirect?code=x"
+    )
+
+
+def test_base_url_with_module_path_is_normalized() -> None:
+    # Nutzer tragen auch die Planseite selbst als iserv_url ein.
+    assert _clean_base_url("https://ebg-kiel.eu/iserv/timetable") == "https://ebg-kiel.eu/iserv"
+    assert _clean_base_url("https://ebg-kiel.eu/iserv/plan/") == "https://ebg-kiel.eu/iserv"
+    assert _clean_base_url("https://ebg-kiel.eu/iserv") == "https://ebg-kiel.eu/iserv"
+    assert _clean_base_url("https://ebg-kiel.eu") == "https://ebg-kiel.eu"
+    assert _clean_base_url("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+    options = IservOptions(base_url="https://ebg-kiel.eu/iserv/timetable", plan_url="")
+    assert options.login_url == "https://ebg-kiel.eu/iserv/auth/login"
+    assert options.resolved_plan_url == "https://ebg-kiel.eu/iserv/plan"
+

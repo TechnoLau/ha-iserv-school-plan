@@ -10,7 +10,9 @@ stattfindende Unterrichtsstunde per MQTT Discovery in Home Assistant bereit.
    Supervisor abgefragt.
 2. `iserv_url` auf die Schuladresse setzen, z. B. `https://ebg.kiel.eu` –
    mit oder ohne `/iserv` am Ende, beides funktioniert. Das ist die einzige
-   Pflichtangabe: die Plantabelle sucht das Add-on selbst.
+   Pflichtangabe: die Plantabelle sucht das Add-on selbst. Wird versehentlich
+   die Planseite eingetragen (`…/iserv/timetable`), kürzt das Add-on den
+   Modulpfad automatisch (ab 1.0.6).
 3. `plan_url` **leer lassen** (Standard). Nur für Sonderfälle eintragen, z. B.
    den Kalender-Export (`/iserv/plan/export/…`) oder einen JSON-Endpunkt.
 4. Benutzername und Passwort eintragen, falls der Plan nicht öffentlich ist.

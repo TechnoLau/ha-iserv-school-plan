@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.6
+
+- Fix für IServ mit neuer Web-Oberfläche (OIDC): Nach dem Login antwortet IServ
+  mit einer Zwischenseite, die per `<meta http-equiv="refresh">` zu
+  `/iserv/app/authentication/redirect?code=…` weiterleitet. Diese Weiterleitung
+  führt das Add-on jetzt selbst aus (Meta-Refresh und JavaScript-Varianten),
+  damit die Sitzung vollständig ist. Bisher blieb die Sitzung unvollständig und
+  jede Planseite zeigte wieder die Anmeldung („Plan enthielt keine
+  verwertbaren Daten … keine `<table>`“)
+- Die Weiterleitung wird auch beim Plan-Abruf nachgeholt (abgelaufene Sitzung)
+  und der Plan danach erneut geladen
+- `iserv_url` darf jetzt auch die komplette Planseite sein, z. B.
+  `https://schule.de/iserv/timetable` oder `…/iserv/plan`: Modulpfade werden
+  abgeschnitten, verwendet wird `https://schule.de/iserv`; das Log nennt die
+  korrigierte Basis
+- Bleibt die Auth-Weiterleitung ohne Ziel stehen, gibt es eine klare Meldung
+  („IServ-Sitzung wurde nicht übernommen“) statt „keine `<table>`“
+- Benutzerkennung des Add-ons nennt sich jetzt `Mozilla/5.0 (compatible; …)`,
+  damit IServ die Anfrage nicht als veralteten Browser behandelt
+
 ## 1.0.5
 
 - Vereinfachung: es genügt jetzt **eine** Angabe – `iserv_url`. `plan_url` ist

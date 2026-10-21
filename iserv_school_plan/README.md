@@ -66,7 +66,7 @@ Passwort). `plan_url` bleibt leer – das Add-on sucht die Plantabelle selbst.
 
 | Option | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
-| `iserv_url` | URL | `https://schule.example.org` | **Die einzige Pflichtangabe:** Basisadresse der Schule, z. B. `https://ebg.kiel.eu` – mit oder ohne `/iserv` am Ende |
+| `iserv_url` | URL | `https://schule.example.org` | **Die einzige Pflichtangabe:** Basisadresse der Schule, z. B. `https://ebg.kiel.eu` – mit oder ohne `/iserv` am Ende. Auch die komplette Planseite (`…/iserv/timetable`, `…/iserv/plan`) wird akzeptiert; ab 1.0.6 wird der Modulpfad automatisch abgeschnitten |
 | `plan_url` | Text | *(leer)* | Optional. Nur nötig für Sonderfälle (Kalender-Export/JSON-Endpunkt). Leer = automatische Suche (`/iserv/plan`, dann `/iserv/timetable`). Nackte Pfade wie `plan` werden unter `/iserv/` einsortiert |
 | `username` | Text | *(leer)* | IServ-Benutzername (leer = ohne Login abrufen) |
 | `password` | Passwort | *(leer)* | IServ-Passwort |
@@ -260,6 +260,7 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
 | `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
 | `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Die Meldung enthält eine Kurzfassung der Antwort (Länge, `<title>`, `<table>`, erste Skript-URLs). Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
+| `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ (neue Web-Oberfläche) leitete nach dem Login per Meta-Refresh/JavaScript weiter; ab 1.0.6 führt das Add-on diese Weiterleitung selbst aus. Bleibt die Meldung, `log_level: debug` setzen – dort steht das gefundene Weiterleitungsziel. Hilft das nicht, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
 | `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
 | Zeiten wirken verschoben | Prüfen, ob IServ lokale Zeiten liefert; `period_times` ist nur ein Fallback |

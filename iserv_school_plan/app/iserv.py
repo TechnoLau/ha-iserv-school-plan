@@ -13,6 +13,7 @@ import logging
 import re
 import ssl
 from dataclasses import dataclass
+from html import unescape
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
@@ -28,7 +29,10 @@ from .parsers import parse_payload
 from .plan import PlanDataset
 
 _LOGGER = logging.getLogger(__name__)
-USER_AGENT = "HA-IServ-Addon/1.0"
+USER_AGENT = (
+    "Mozilla/5.0 (compatible; HA-IServ-Addon/1.0; "
+    "+https://github.com/TechnoLau/ha-iserv-school-plan)"
+)
 # Pfade, unter denen IServ die klassische Plantabelle ausliefert. Der erste
 # Eintrag ist gleichzeitig der Standard, wenn keine ``plan_url`` gesetzt ist.
 # Die weiteren werden probiert, falls der erste keine Tabelle liefert (z. B.
@@ -39,9 +43,30 @@ PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
 LOGIN_PAGE_MARKERS = ('id="login-form"', 'id="password_login"')
 # Merkmale des IServ-Wartungsmodus (eigener Webserver, eigener Hinweistext).
 MAINTENANCE_MARKERS = ("iserv maintenance web server", "wartungsarbeiten", "maintenance")
+# Merkmale der IServ-Auth-Zwischenseite (OIDC). Nach dem Login antwortet IServ
+# mit einer Seite, die per Meta-Refresh zu
+# ``/iserv/app/authentication/redirect?code=...`` weiterleitet. urllib folgt nur
+# HTTP-Redirects - ohne dieses Nachfassen bleibt die Sitzung der Web-Oberflaeche
+# unvollstaendig und jede Planseite zeigt wieder die Anmeldung.
+AUTH_REDIRECT_MARKERS = (
+    'id="redirect-text"',
+    "/auth/static/js/redirect",
+    "authentication/redirect",
+)
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _SCRIPT_RE = re.compile(r"<script[^>]+src=\"([^\"]+)\"", re.IGNORECASE)
 _WAIT_RE = re.compile(r'data-seconds="(\d+)"')
+_META_REFRESH_RE = re.compile(r"<meta[^>]*http-equiv=[\"']?refresh[\"']?[^>]*>", re.IGNORECASE)
+_META_CONTENT_RE = re.compile(
+    r"content\s*=\s*\"([^\"]*)\"|content\s*=\s*'([^']*)'", re.IGNORECASE
+)
+_META_URL_RE = re.compile(r"url\s*=\s*['\"]?([^'\">\s]+)", re.IGNORECASE)
+_JS_REDIRECT_RE = re.compile(
+    r"location(?:\.href)?\s*=\s*[\"']([^\"']+)[\"']"
+    r"|location\.(?:replace|assign)\(\s*[\"']([^\"']+)[\"']"
+    r"|fetch\(\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
 # Typische Fehlertexte der IServ-Anmeldeseite (Abgleich auf dem Sichttext).
 LOGIN_ERROR_HINTS = (
     "Ungültige Anmeldedaten",
@@ -72,6 +97,72 @@ def _looks_like_login_page(url: str, body: str) -> bool:
     if re.search(r"/auth/login\b", url):
         return True
     return any(marker in body for marker in LOGIN_PAGE_MARKERS)
+
+
+def _clean_base_url(base_url: str) -> str:
+    """Entfernt Modulpfade aus der IServ-Adresse.
+
+    Nutzer tragen auch die komplette Planseite ein (z. B.
+    ``https://schule.de/iserv/timetable``). Login und Plan liegen aber immer
+    unterhalb von ``/iserv`` - deshalb wird alles nach dem ersten ``/iserv/``
+    abgeschnitten. Sonst entsteht ``/iserv/timetable/iserv/auth/login``.
+    """
+    raw = (base_url or "").strip().rstrip("/")
+    match = re.match(r"^(https?://[^/]+)(/.*)?$", raw, re.IGNORECASE)
+    if not match:
+        return raw
+    host = match.group(1)
+    path = match.group(2) or ""
+    index = path.lower().find("/iserv/")
+    if index >= 0:
+        return host + path[: index + len("/iserv")]
+    return raw
+
+
+def _meta_refresh_target(html: str, base_url: str) -> str:
+    """Liest das Ziel eines ``<meta http-equiv="refresh">``.
+
+    IServ nutzt beide Schreibweisen: ``content="0;url='/pfad'"`` und
+    ``content="5; /pfad"`` (ohne ``url=``).
+    """
+    for tag in _META_REFRESH_RE.findall(html):
+        content_match = _META_CONTENT_RE.search(tag)
+        if not content_match:
+            continue
+        content = next(
+            (group for group in content_match.groups() if group is not None), ""
+        ).strip()
+        url_match = _META_URL_RE.search(content)
+        target = url_match.group(1) if url_match else ""
+        if not target and ";" in content:
+            target = content.split(";", 1)[1]
+        target = target.strip().strip("'\"")
+        if target:
+            return urljoin(base_url, unescape(target))
+    return ""
+
+
+def _auth_redirect_target(html: str, base_url: str) -> str:
+    """Sucht das Ziel der IServ-Auth-Weiterleitung (Meta-Refresh oder Script)."""
+    target = _meta_refresh_target(html, base_url)
+    if target:
+        return target
+    for match in _JS_REDIRECT_RE.finditer(html):
+        candidate = next((group for group in match.groups() if group), "").strip()
+        if candidate and not candidate.lower().startswith(("javascript:", "#")):
+            return urljoin(base_url, unescape(candidate))
+    return ""
+
+
+def _needs_auth_redirect(url: str, body: str) -> bool:
+    """Erkennt die Auth-Zwischenseite, die ohne JavaScript stehen bleibt."""
+    if "<table" in body.lower():
+        return False
+    if any(marker in body for marker in AUTH_REDIRECT_MARKERS):
+        return True
+    if "/auth/" in url.lower() and _META_REFRESH_RE.search(body):
+        return True
+    return "/auth/auth" in url.lower()
 
 
 def _visible_text(html: str) -> str:
@@ -151,6 +242,16 @@ class IservOptions:
     klasse: str = ""
     timeout: int = 30
     verify_ssl: bool = True
+
+    def __post_init__(self) -> None:
+        raw = (self.base_url or "").strip().rstrip("/")
+        cleaned = _clean_base_url(raw)
+        if cleaned != raw:
+            _LOGGER.info(
+                "iserv_url enthielt einen Modulpfad (%s) - verwendet wird %s", raw, cleaned
+            )
+        self.base_url = cleaned
+        self.plan_url = (self.plan_url or "").strip()
 
     @property
     def login_url(self) -> str:
@@ -365,9 +466,63 @@ class IservClient:
         if _looks_like_login_page(final_url, body):
             raise AuthError(self._login_failure_message(body))
 
+        # Die neue IServ-Anmeldung endet auf einer OIDC-Zwischenseite, die per
+        # Meta-Refresh weiterleitet. Ohne dieses Nachfassen fehlt die Sitzung
+        # der Web-Oberflaeche - der Plan zeigt dann wieder die Anmeldung.
+        body, final_url, _ = self._complete_auth_redirects(response, body)
+
+        if _looks_like_login_page(final_url, body):
+            raise AuthError(self._login_failure_message(body))
+        if _needs_auth_redirect(final_url, body):
+            raise AuthError(
+                "Login erfolgreich, aber die IServ-Sitzung wurde nicht uebernommen - "
+                f"die Auth-Weiterleitung blieb stehen [{_html_summary(body)}]"
+            )
+
         self._logged_in = True
         _LOGGER.info("IServ-Login erfolgreich (%s)", final_url)
         return True
+
+    def _complete_auth_redirects(
+        self, response, body: str, accept: str | None = None
+    ) -> tuple[str, str, str]:
+        """Fuehrt Auth-Weiterleitungen aus, die per Meta-Refresh laufen.
+
+        IServ antwortet nach dem Login (und bei jeder Anfrage ohne vollstaendige
+        Sitzung) mit einer Zwischenseite, die per ``<meta http-equiv="refresh">``
+        zu ``/iserv/app/authentication/redirect?code=...`` schickt. Erst dieser
+        Aufruf setzt die Sitzungs-Cookies der Web-Oberflaeche. ``urllib`` folgt
+        nur HTTP-Redirects, darum wird hier nachgefasst.
+        """
+        url = response.geturl()
+        content_type = response.headers.get_content_type()
+        for _ in range(3):
+            if not _needs_auth_redirect(url, body):
+                break
+            target = _auth_redirect_target(body, url)
+            if not target:
+                _LOGGER.debug(
+                    "Auth-Weiterleitung ohne erkennbares Ziel (%s): %s",
+                    _html_summary(body),
+                    _visible_text(body)[:160],
+                )
+                break
+            _LOGGER.debug("IServ-Auth-Weiterleitung wird ausgefuehrt: %s", target)
+            try:
+                with self._request(target, accept=accept or ACCEPT_HTML) as redirect:
+                    body = self._read(redirect)
+                    url = redirect.geturl()
+                    content_type = redirect.headers.get_content_type()
+            except HTTPError as err:
+                raise AuthError(
+                    f"IServ-Login-Weiterleitung fehlgeschlagen (HTTP {err.code}) - "
+                    "Zugangsdaten/Rechte pruefen"
+                ) from err
+            except URLError as err:
+                raise IservError(
+                    f"IServ-Login-Weiterleitung fehlgeschlagen: {err.reason}"
+                ) from err
+        return body, url, content_type
 
     @staticmethod
     def _login_failure_message(body: str) -> str:
@@ -402,7 +557,20 @@ class IservClient:
         """Holt die Plan-URL mit einem bestimmten ``Accept``-Header."""
         with self._request(url, accept=accept) as response:
             text = self._read(response)
-            return text, response.headers.get_content_type(), response.geturl()
+            text, final_url, content_type = self._complete_auth_redirects(
+                response, text, accept
+            )
+        if final_url.split("?", 1)[0] != url.split("?", 1)[0]:
+            # Die Auth-Weiterleitung hat eine andere Seite geliefert (z. B. die
+            # OIDC-Bestaetigung) - jetzt ist die Sitzung vollstaendig, also die
+            # eigentliche Plan-URL erneut abrufen.
+            _LOGGER.debug("Plan wird nach der Login-Weiterleitung erneut geladen: %s", url)
+            with self._request(url, accept=accept) as response:
+                text = self._read(response)
+                text, final_url, content_type = self._complete_auth_redirects(
+                    response, text, accept
+                )
+        return text, content_type, final_url
 
     @staticmethod
     def _plan_error(err: HTTPError, url: str, accept: str) -> AuthError:
