@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+pytest_out.txt
+
+# Tests/Artefakte
+.coverage
+htmlcov/
+
+# Lokale Konfiguration und Daten (niemals committen)
+options.json
+cache.json
+debug/
+*.log
+
+# Betriebssystem/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
