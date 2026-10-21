@@ -202,7 +202,7 @@ def test_failed_refresh_dumps_raw_response(tmp_path, monkeypatch) -> None:
 def test_invalid_options_are_reported_but_addon_keeps_running() -> None:
     addon = Addon(AddonOptions())
     problems = addon.options.validate()
-    assert any("plan_url" in problem for problem in problems)
+    assert any("iserv_url" in problem for problem in problems)
 
 
 def test_supervisor_mqtt_credentials_are_used(monkeypatch) -> None:

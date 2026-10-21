@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.5
+
+- Vereinfachung: es genügt jetzt **eine** Angabe – `iserv_url`. `plan_url` ist
+  optional und standardmäßig leer; das Add-on nutzt dann automatisch
+  `/iserv/plan` und probiert bei Bedarf `/iserv/timetable`
+- `plan_url` versteht absolute URLs, `/iserv/...`-Pfade und nackte Pfade wie
+  `plan` (wird unter `/iserv/` einsortiert)
+- Wartungsmodus wird erkannt: HTTP 503 mit `X-IServ-Maintenance` bzw. der
+  „Wartungsarbeiten“-Seite ergibt eine klare Meldung („IServ ist im
+  Wartungsmodus“) statt eines Tracebacks mit „iserv_url prüfen“
+- `IservError` wird im Betrieb sauber als Warnung geloggt (kein Traceback mehr
+  bei vorübergehenden Serverfehlern)
+- Kein Fehler mehr, wenn `plan_url` fehlt (`plan_url` ist im Schema optional)
+
 ## 1.0.4
 
 - Fix: `iserv_url` darf jetzt mit und ohne `/iserv` eingetragen werden. Bisher

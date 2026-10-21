@@ -13,11 +13,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import AddonOptions, load_options
-from .iserv import AuthError, FetchError, IservClient, IservOptions
+from .iserv import IservClient, IservError, IservOptions
 from .mqtt import MqttPublisher, supervisor_mqtt_config
 from .plan import TZ, PlanDataset, apply_period_times, select_plan
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -175,7 +175,7 @@ class Addon:
         self.last_attempt = now
         try:
             dataset = self.client.fetch_dataset(default_year=now.year)
-        except (AuthError, FetchError, ValueError) as err:
+        except (IservError, ValueError) as err:
             self.last_error = str(err)
             self.client.invalidate_session()
             _LOGGER.warning("Plan-Abruf fehlgeschlagen: %s", err)

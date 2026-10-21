@@ -9,9 +9,10 @@ stattfindende Unterrichtsstunde per MQTT Discovery in Home Assistant bereit.
    `mqtt_host: core-mosquitto` werden die Zugangsdaten automatisch beim
    Supervisor abgefragt.
 2. `iserv_url` auf die Schuladresse setzen, z. B. `https://ebg.kiel.eu` –
-   mit oder ohne `/iserv` am Ende, beides funktioniert.
-3. `plan_url` auf die klassische Plantabelle bzw. den Export setzen, z. B.
-   `/iserv/plan` (nicht `/iserv/timetable`: das ist die JavaScript-Web-App).
+   mit oder ohne `/iserv` am Ende, beides funktioniert. Das ist die einzige
+   Pflichtangabe: die Plantabelle sucht das Add-on selbst.
+3. `plan_url` **leer lassen** (Standard). Nur für Sonderfälle eintragen, z. B.
+   den Kalender-Export (`/iserv/plan/export/…`) oder einen JSON-Endpunkt.
 4. Benutzername und Passwort eintragen, falls der Plan nicht öffentlich ist.
 5. Optional `free_days` (Ferien/Feiertage) und `period_times` (Stundenzeiten)
    ergänzen.
@@ -53,7 +54,11 @@ Repositories.
   HTML-Tabelle in der Antwort“, zeigt `plan_url` auf die JavaScript-Web-App von
   IServ – ab Version 1.0.4 werden automatisch `/iserv/plan` und
   `/iserv/timetable` als klassische Tabelle probiert; das Log nennt die URL, die
-  Daten geliefert hat.
+  Daten geliefert hat. Ab Version 1.0.5 genügt `iserv_url`, `plan_url` bleibt
+  leer.
+- „IServ ist im Wartungsmodus“: IServ liefert HTTP 503 vom Wartungs-Webserver
+  (Header `X-IServ-Maintenance`, Seite „Wartungsarbeiten“). Das Add-on versucht
+  es automatisch erneut; keine Konfigurationsänderung nötig.
 - Erscheinen keine Entities: MQTT-Verbindung, Discovery-Prefix und
   Broker-Zugangsdaten kontrollieren.
 - „MQTT-Verbindung abgelehnt: Not authorized“: Die Ports in der

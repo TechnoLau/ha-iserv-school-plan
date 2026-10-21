@@ -29,13 +29,16 @@ from .plan import PlanDataset
 
 _LOGGER = logging.getLogger(__name__)
 USER_AGENT = "HA-IServ-Addon/1.0"
-# Pfade, unter denen IServ die klassische Plantabelle ausliefert. Sie werden nur
-# probiert, wenn die konfigurierte ``plan_url`` keine Tabelle liefert (z. B.
-# weil sie auf die JavaScript-Web-App zeigt).
-FALLBACK_PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
+# Pfade, unter denen IServ die klassische Plantabelle ausliefert. Der erste
+# Eintrag ist gleichzeitig der Standard, wenn keine ``plan_url`` gesetzt ist.
+# Die weiteren werden probiert, falls der erste keine Tabelle liefert (z. B.
+# weil ``plan_url`` auf die JavaScript-Web-App zeigt).
+PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
 # Erkennungsmerkmale der IServ-Anmeldeseite (klassische Seite und neue Web-App).
 # Bewusst nur sehr spezifische Marker, damit normale Seiten nicht als Login gelten.
 LOGIN_PAGE_MARKERS = ('id="login-form"', 'id="password_login"')
+# Merkmale des IServ-Wartungsmodus (eigener Webserver, eigener Hinweistext).
+MAINTENANCE_MARKERS = ("iserv maintenance web server", "wartungsarbeiten", "maintenance")
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _SCRIPT_RE = re.compile(r"<script[^>]+src=\"([^\"]+)\"", re.IGNORECASE)
 _WAIT_RE = re.compile(r'data-seconds="(\d+)"')
@@ -91,6 +94,29 @@ def _html_summary(html: str) -> str:
     return "; ".join(parts)
 
 
+def _server_hint(err: HTTPError, body: str | None = None) -> str:
+    """Klartext-Hinweis fuer 503/429 (Wartungsmodus, Drosselung).
+
+    IServ antwortet im Wartungsmodus mit HTTP 503 von einem eigenen Webserver
+    (``Server: IServ Maintenance Web Server``, Header ``X-IServ-Maintenance: 1``).
+    Ohne diese Erkennung sieht das wie ein Konfigurationsfehler aus.
+    """
+    headers = getattr(err, "headers", None)
+    if headers is not None and headers.get("x-iserv-maintenance"):
+        return "IServ ist im Wartungsmodus (Wartungsarbeiten)"
+    if body is None:
+        try:
+            body = err.read().decode("utf-8", errors="replace")
+        except (OSError, ValueError):  # pragma: no cover - Body nicht lesbar
+            body = ""
+    lowered = body.lower()
+    if any(marker in lowered for marker in MAINTENANCE_MARKERS):
+        return "IServ ist im Wartungsmodus (Wartungsarbeiten)"
+    if err.code == 429:
+        return "IServ drosselt die Anfragen (HTTP 429) - bitte spaeter erneut versuchen"
+    return ""
+
+
 # Wichtig: Die neue IServ-Web-App behandelt Anfragen, deren ``Accept``-Header
 # ``application/json`` enthaelt, als API-Aufruf und antwortet ohne API-Token mit
 # HTTP 401 - auch bei gueltiger Sitzung. Darum wird der Header je Endpunkt
@@ -118,7 +144,7 @@ class FetchError(IservError):
 @dataclass
 class IservOptions:
     base_url: str
-    plan_url: str
+    plan_url: str = ""
     username: str = ""
     password: str = ""
     plan_format: str = "auto"
@@ -140,7 +166,24 @@ class IservOptions:
 
     @property
     def resolved_plan_url(self) -> str:
-        return urljoin(self.base_url.rstrip("/") + "/", self.plan_url)
+        """Plantabelle - ohne eigene ``plan_url`` der klassische IServ-Pfad.
+
+        Damit genuegt in den Optionen die IServ-Adresse; ``plan_url`` ist nur
+        noch fuer Sonderfaelle (Kalender-Export, JSON-Endpunkt) noetig.
+        """
+        target = (self.plan_url or "").strip()
+        root = self.site_root
+        if not target:
+            return root + PLAN_PATHS[0]
+        if target.lower().startswith(("http://", "https://")):
+            return target
+        if target.startswith("/iserv/"):
+            return root + target
+        if target.startswith("/"):
+            # Absoluter Pfad auf demselben Host (z. B. "/plan" in Tests).
+            return root + target
+        # Nackter Pfad wie "plan" oder "plan/export" -> unter /iserv/ einsortieren.
+        return root + "/iserv/" + target.lstrip("/")
 
 
 class _LoginFormParser(HTMLParser):
@@ -274,6 +317,11 @@ class IservClient:
                 page = self._read(response)
                 page_url = response.geturl()
         except HTTPError as err:
+            hint = _server_hint(err)
+            if hint:
+                raise IservError(
+                    f"{hint} - Login gerade nicht moeglich, bitte spaeter erneut versuchen"
+                ) from err
             raise IservError(
                 f"Loginseite nicht erreichbar (HTTP {err.code}) - iserv_url pruefen"
             ) from err
@@ -367,6 +415,9 @@ class IservClient:
             body = err.read().decode("utf-8", errors="replace")
         except (OSError, ValueError):  # pragma: no cover - Body nicht lesbar
             body = ""
+        hint = _server_hint(err, body)
+        if hint:
+            details.append(hint)
         body = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", body)).strip()
         if body:
             details.append(body[:200])
@@ -377,11 +428,11 @@ class IservClient:
         )
 
     def fetch_plan_text(self) -> tuple[str, str]:
-        if not self.options.plan_url:
-            raise FetchError("plan_url ist nicht konfiguriert")
         self._ensure_login()
 
         url = self.options.resolved_plan_url
+        if not self.options.plan_url:
+            _LOGGER.debug("plan_url nicht gesetzt - Standardpfad %s wird verwendet", url)
         accept = _accept_for(url, self.options.plan_format)
         # Manche IServ-Instanzen liefern fuer Kalender-/JSON-Pfade HTML aus -
         # deshalb bei 401/403 einmal mit Browser-Accept nachfassen.
@@ -402,7 +453,11 @@ class IservClient:
                 break
             except HTTPError as err:
                 if err.code not in (401, 403):
-                    raise FetchError(f"Plan-Abruf fehlgeschlagen (HTTP {err.code})") from err
+                    hint = _server_hint(err)
+                    details = f" - {hint}" if hint else ""
+                    raise FetchError(
+                        f"Plan-Abruf fehlgeschlagen (HTTP {err.code}){details}"
+                    ) from err
                 if index < len(candidates) - 1:
                     _LOGGER.warning(
                         "Plan-Abruf mit Accept '%s' abgelehnt (HTTP %s) - neuer Versuch mit Browser-Accept",
@@ -424,10 +479,10 @@ class IservClient:
         return text, content_type
 
     def _fallback_plan_urls(self) -> list[str]:
-        """Klassische Plan-Pfade, die als Ausweichziel probiert werden."""
+        """Alle bekannten Plan-Pfade ausser dem bereits versuchten."""
         configured = self.options.resolved_plan_url.rstrip("/").lower()
         urls: list[str] = []
-        for path in FALLBACK_PLAN_PATHS:
+        for path in PLAN_PATHS:
             url = self.options.site_root + path
             if url.rstrip("/").lower() == configured or url in urls:
                 continue
@@ -471,11 +526,14 @@ class IservClient:
                 self.last_raw = text
                 self.last_content_type = content_type
                 self.last_url = final_url
-                _LOGGER.warning(
-                    "plan_url lieferte keine Tabelle - Daten kommen von %s. "
-                    "Bitte plan_url in den Optionen anpassen.",
-                    url,
-                )
+                if self.options.plan_url:
+                    _LOGGER.warning(
+                        "plan_url lieferte keine Tabelle - Daten kommen von %s. "
+                        "Tipp: plan_url leer lassen, dann sucht das Add-on selbst.",
+                        url,
+                    )
+                else:
+                    _LOGGER.info("Plantabelle automatisch gefunden: %s", url)
                 return dataset
             _LOGGER.debug("Auch %s ohne Tabelle (%s)", url, _html_summary(text))
         return None

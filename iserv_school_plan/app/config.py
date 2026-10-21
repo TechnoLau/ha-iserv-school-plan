@@ -40,6 +40,7 @@ class AddonOptions:
 
     def __post_init__(self) -> None:
         self.iserv_url = _normalize_url(self.iserv_url)
+        self.plan_url = (self.plan_url or "").strip()
         fmt = (self.plan_format or "auto").lower()
         self.plan_format = fmt if fmt in ("auto", "html", "json", "ics") else "auto"
         self.lookahead_days = max(1, min(int(self.lookahead_days or 21), 60))
@@ -56,8 +57,6 @@ class AddonOptions:
         problems: list[str] = []
         if DEFAULT_URL in self.iserv_url:
             problems.append("iserv_url muss auf die eigene IServ-Adresse gesetzt werden")
-        if not self.plan_url:
-            problems.append("plan_url fehlt (Pfad oder URL zum Stundenplan/Export)")
         if self.username and not self.password:
             problems.append("username ohne password gesetzt")
         return problems

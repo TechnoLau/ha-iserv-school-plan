@@ -16,6 +16,7 @@ from app.iserv import (
     AuthError,
     FetchError,
     IservClient,
+    IservError,
     IservOptions,
     _LoginFormParser,
     _accept_for,
@@ -140,6 +141,49 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
+MAINTENANCE_PAGE = """
+<!-- maintenance mode template for IServ -->
+<html lang="de"><head><title>Wartungsarbeiten / Maintenance</title></head>
+<body><h1>Wartungsarbeiten</h1>
+<p>Auf diesem IServ finden gerade Wartungsarbeiten statt.</p></body></html>
+"""
+
+
+class MaintenanceHandler(BaseHTTPRequestHandler):
+    """Bildet den IServ-Wartungsmodus nach (eigener Webserver, HTTP 503)."""
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        payload = MAINTENANCE_PAGE.encode("utf-8")
+        self.send_response(503)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-IServ-Maintenance", "1")
+        self.send_header("Server", "IServ Maintenance Web Server")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        self.do_GET()
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.fixture()
+def maintenance_url() -> str:
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), MaintenanceHandler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 @pytest.fixture()
 def server_url() -> str:
     SEEN_ACCEPTS.clear()
@@ -177,6 +221,52 @@ def test_base_url_with_iserv_suffix_is_normalized() -> None:
     assert options.login_url == "https://ebg.kiel.eu/iserv/auth/login"
     assert options.site_root == "https://ebg.kiel.eu"
     assert options.resolved_plan_url == "https://ebg.kiel.eu/iserv/plan"
+
+
+def test_plan_url_is_optional_and_defaults_to_classic_path() -> None:
+    # Nur die IServ-Adresse angeben - der Planpfad wird automatisch gesetzt.
+    assert (
+        IservOptions(base_url="https://ebg.kiel.eu", plan_url="").resolved_plan_url
+        == "https://ebg.kiel.eu/iserv/plan"
+    )
+    assert (
+        IservOptions(base_url="https://ebg.kiel.eu/iserv", plan_url="").resolved_plan_url
+        == "https://ebg.kiel.eu/iserv/plan"
+    )
+
+
+def test_relative_plan_url_is_placed_under_iserv() -> None:
+    options = IservOptions(base_url="https://ebg.kiel.eu", plan_url="plan")
+    assert options.resolved_plan_url == "https://ebg.kiel.eu/iserv/plan"
+    exported = IservOptions(base_url="https://ebg.kiel.eu", plan_url="https://ebg.kiel.eu/plan/export.ics")
+    assert exported.resolved_plan_url == "https://ebg.kiel.eu/plan/export.ics"
+
+
+def test_fetch_without_plan_url_uses_default_path(server_url: str) -> None:
+    options = IservOptions(base_url=server_url, username="test", password="geheim")
+    client = IservClient(options)
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/plan")
+
+
+def test_maintenance_mode_is_reported(maintenance_url: str) -> None:
+    options = IservOptions(
+        base_url=maintenance_url,
+        username="test",
+        password="geheim",
+    )
+    client = IservClient(options)
+    with pytest.raises(IservError) as error:
+        client.fetch_dataset(default_year=2026)
+    assert "Wartungsmodus" in str(error.value)
+
+
+def test_maintenance_mode_on_plan_request_is_reported(maintenance_url: str) -> None:
+    client = IservClient(IservOptions(base_url=maintenance_url))
+    with pytest.raises(FetchError) as error:
+        client.fetch_dataset(default_year=2026)
+    assert "Wartungsmodus" in str(error.value)
 
 
 def test_fetch_falls_back_to_classic_plan_path(server_url: str) -> None:

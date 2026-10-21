@@ -14,7 +14,10 @@ def test_defaults_are_sane() -> None:
     assert options.plan_format == "auto"
     assert options.lookahead_days == 21
     assert options.refresh_minutes == 30
-    assert any("plan_url" in item for item in options.validate())
+    # Nur die IServ-Adresse ist Pflicht - die Plantabelle wird automatisch gesucht.
+    assert options.plan_url == ""
+    assert any("iserv_url" in item for item in options.validate())
+    assert not any("plan_url" in item for item in options.validate())
 
 
 def test_load_options_parses_strings(tmp_path) -> None:
@@ -79,5 +82,5 @@ def test_validation_reports_missing_configuration() -> None:
     options = AddonOptions(username="kind", password="")
     problems = options.validate()
     assert any("iserv_url" in item for item in problems)
-    assert any("plan_url" in item for item in problems)
+    assert not any("plan_url" in item for item in problems)
     assert any("password" in item for item in problems)
