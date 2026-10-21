@@ -17,7 +17,7 @@ from .iserv import AuthError, FetchError, IservClient, IservOptions
 from .mqtt import MqttPublisher, supervisor_mqtt_config
 from .plan import TZ, PlanDataset, apply_period_times, select_plan
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -130,6 +130,7 @@ class Addon:
             meta = {
                 "content_type": content_type,
                 "plan_url": self.options.plan_url,
+                "resolved_url": self.client.last_url,
                 "bytes": len(raw),
                 "saved_at": datetime.now(TZ).isoformat(timespec="seconds"),
             }
@@ -257,9 +258,10 @@ class Addon:
             apply_period_times(self.dataset, self.options.parsed_period_times)
         self.publisher.start()
         _LOGGER.info(
-            "IServ-Schulplan %s gestartet (Server: %s, Abruf alle %s Minuten)",
+            "IServ-Schulplan %s gestartet (Server: %s, Plan: %s, Abruf alle %s Minuten)",
             VERSION,
             self.options.iserv_url,
+            self.client.options.resolved_plan_url,
             self.options.refresh_minutes,
         )
         try:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.2
+
+- Fix: Plan-Abruf endete nach erfolgreichem Login mit `HTTP 401`. Ursache war
+  der `Accept`-Header: Enthielt er `application/json`, behandelt die neue
+  IServ-Web-App die Anfrage als API-Aufruf ohne Token und antwortet mit 401 –
+  auch bei gültiger Sitzung. Der Header wird jetzt je Ziel getrennt gesetzt
+  (HTML, Kalender, JSON)
+- Bei 401/403 auf Kalender-/JSON-Pfaden wird einmal mit Browser-`Accept`
+  nachgefasst und das Format anschließend automatisch erkannt
+- Fehlermeldung nennt jetzt Plan-URL, verwendeten `Accept`-Header,
+  `WWW-Authenticate` und einen Auszug der Serverantwort
+- Start-Log zeigt die aufgelöste Plan-URL; der Debug-Dump speichert sie mit
+
 ## 1.0.1
 
 - Build-Fix: `build.yaml` entfernt (beim Supervisor deprecated); der Dockerfile

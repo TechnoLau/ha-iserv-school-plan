@@ -10,10 +10,14 @@ from urllib.parse import parse_qs
 import pytest
 
 from app.iserv import (
+    ACCEPT_CALENDAR,
+    ACCEPT_HTML,
+    ACCEPT_JSON,
     AuthError,
     IservClient,
     IservOptions,
     _LoginFormParser,
+    _accept_for,
     _detect_fields,
 )
 
@@ -40,12 +44,23 @@ PLAN_PAGE = """
 """
 
 
+SEEN_ACCEPTS: list[str] = []
+
+
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, status: int, body: str, content_type: str = "text/html; charset=utf-8") -> None:
+    def _send(
+        self,
+        status: int,
+        body: str,
+        content_type: str = "text/html; charset=utf-8",
+        extra_headers: dict | None = None,
+    ) -> None:
         payload = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -59,6 +74,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             self._send(200, PLAN_PAGE)
+        elif self.path == "/plan-api":
+            # Verhaelt sich wie eine neue IServ-Instanz: ``application/json`` im
+            # Accept-Header wird als API-Aufruf ohne Token mit 401 quittiert.
+            accept = self.headers.get("Accept") or ""
+            SEEN_ACCEPTS.append(accept)
+            if "session=ok" not in (self.headers.get("Cookie") or ""):
+                self._send(401, "keine Sitzung", extra_headers={"WWW-Authenticate": 'Bearer realm="iserv"'})
+            elif "application/json" in accept:
+                self._send(401, '{"error":"unauthorized"}', "application/json")
+            else:
+                self._send(200, PLAN_PAGE)
+        elif self.path == "/plan-noauth":
+            self._send(
+                401,
+                '{"error":"token required"}',
+                "application/json",
+                {"WWW-Authenticate": 'Basic realm="iserv"'},
+            )
         else:
             self._send(404, "not found")
 
@@ -84,6 +117,7 @@ class Handler(BaseHTTPRequestHandler):
 
 @pytest.fixture()
 def server_url() -> str:
+    SEEN_ACCEPTS.clear()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -144,3 +178,48 @@ def test_missing_login_redirects_to_auth_error(server_url: str) -> None:
     client = IservClient(options)
     with pytest.raises(AuthError):
         client.fetch_dataset(default_year=2026)
+
+
+def test_accept_header_is_chosen_per_format() -> None:
+    assert _accept_for("https://schule.de/iserv/plan") == ACCEPT_HTML
+    assert _accept_for("https://schule.de/iserv/plan/", plan_format="auto") == ACCEPT_HTML
+    assert _accept_for("https://schule.de/iserv/plan/export/plan.ics") == ACCEPT_CALENDAR
+    assert _accept_for("https://schule.de/iserv/plan/export", plan_format="ics") == ACCEPT_CALENDAR
+    assert _accept_for("https://schule.de/iserv/plan/api/plan", plan_format="json") == ACCEPT_JSON
+    assert _accept_for("https://schule.de/iserv/plan/plan.json") == ACCEPT_JSON
+
+
+def test_html_and_calendar_accept_never_request_json() -> None:
+    # Regression: IServ (neue Web-App) antwortet mit HTTP 401, sobald
+    # ``application/json`` im Accept-Header steht - auch bei gueltiger Sitzung.
+    assert "application/json" not in ACCEPT_HTML
+    assert "application/json" not in ACCEPT_CALENDAR
+
+
+def test_json_plan_falls_back_to_html_accept(server_url: str) -> None:
+    options = IservOptions(
+        base_url=server_url,
+        plan_url="/plan-api",
+        username="test",
+        password="geheim",
+        plan_format="json",
+    )
+    client = IservClient(options)
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert len(SEEN_ACCEPTS) == 2
+    assert "application/json" in SEEN_ACCEPTS[0]
+    assert "application/json" not in SEEN_ACCEPTS[1]
+    assert client.last_content_type == "text/html"
+
+
+def test_unauthorized_plan_reports_details(server_url: str) -> None:
+    options = IservOptions(base_url=server_url, plan_url="/plan-noauth")
+    client = IservClient(options)
+    with pytest.raises(AuthError) as info:
+        client.fetch_dataset(default_year=2026)
+    message = str(info.value)
+    assert "401" in message
+    assert "/plan-noauth" in message
+    assert "WWW-Authenticate" in message
+    assert "token required" in message

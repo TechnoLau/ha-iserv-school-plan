@@ -222,6 +222,7 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | Status `error`, `last_error: plan_url fehlt` | `plan_url` in der Add-on-Konfiguration setzen |
 | `Login fehlgeschlagen …` | Benutzername/Passwort prüfen; Schul-URL prüfen (`/iserv/auth/login`) |
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
+| `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
 | `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. `debug_dump: true` aktivieren, Add-on neu starten und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
 | Zeiten wirken verschoben | Prüfen, ob IServ lokale Zeiten liefert; `period_times` ist nur ein Fallback |
