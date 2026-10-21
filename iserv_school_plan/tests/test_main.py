@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta, time
 
 import pytest
 
 import app.main as main_module
 from app.config import AddonOptions
+from app.holidays import HolidayCalendar
 from app.iserv import FetchError
 from app.main import Addon
-from app.plan import TZ, DayPlan, Lesson, PlanDataset
+from app.plan import TZ, DayPlan, Holiday, Lesson, PlanDataset
 
 
 @pytest.fixture(autouse=True)
@@ -51,11 +53,18 @@ def make_dataset(now: datetime) -> PlanDataset:
 def make_addon(**overrides) -> Addon:
     options = AddonOptions(
         iserv_url="https://schule.example.org",
-        plan_url="/iserv/plan",
         period_times="1=07:45-08:30;2=08:35-09:20;3=09:50-10:35",
         **overrides,
     )
     return Addon(options)
+
+
+def herbstferien(now: datetime) -> HolidayCalendar:
+    return HolidayCalendar(
+        bundesland="Schleswig-Holstein",
+        ranges=[Holiday(date(2026, 10, 12), date(2026, 10, 24), "Herbstferien")],
+        fetched_at=now,
+    )
 
 
 def test_build_state_morning_uses_today() -> None:
@@ -65,17 +74,81 @@ def test_build_state_morning_uses_today() -> None:
 
     state = addon.build_state(now)
 
+    assert state["connection"] == "verbunden"
     assert state["status"] == "ok"
     assert state["target_date"] == "2026-10-19"
     assert state["start"] == "2026-10-19T07:45:00+02:00"
-    assert state["alarm"] is True
+    assert state["start_iso"] == state["start"]
     assert state["period"] == 1
+    assert state["hours_until"] == 0
     assert state["subject"] == "Mathematik"
     assert state["room"] == "A1"
     assert state["cancelled_periods"] == [2]
     assert state["data_age_minutes"] == 0
     assert state["last_error"] is None
+    assert state["bundesland"] == "Schleswig-Holstein"
+    assert state["holidays_updated"] is None
     json.dumps(state)
+
+
+def test_wecker_morgen_for_next_school_day() -> None:
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+
+    state = addon.build_state(now)
+
+    assert state["wecker_morgen"] is True
+    assert state["wecker_morgen_date"] == "2026-10-20"
+    assert state["wecker_morgen_start"] == "09:50"
+    assert state["wecker_morgen_period"] == 3
+    assert state["wecker_morgen_subject"] == "Physik"
+    assert state["wecker_morgen_reason"] == "Unterricht"
+
+
+def test_wecker_morgen_off_on_weekend() -> None:
+    now = datetime(2026, 10, 23, 13, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+
+    state = addon.build_state(now)
+
+    assert state["wecker_morgen"] is False
+    assert state["wecker_morgen_date"] == "2026-10-24"
+    assert state["wecker_morgen_reason"] == "Wochenende"
+
+
+def test_wecker_morgen_off_on_holiday() -> None:
+    now = datetime(2026, 10, 20, 18, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+    addon.holidays = herbstferien(now)
+
+    state = addon.build_state(now)
+
+    assert state["wecker_morgen"] is False
+    assert state["wecker_morgen_date"] == "2026-10-21"
+    assert state["wecker_morgen_reason"] == "Herbstferien"
+    assert state["wecker_morgen_start"] is None
+    assert state["status"] == "ferien"
+
+
+def test_holidays_bridge_missing_plan_data() -> None:
+    """Ohne IServ-Daten fuer Ferientage kommt der Status aus dem Kalender."""
+    now = datetime(2026, 10, 21, 8, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+    addon.holidays = herbstferien(now)
+
+    state = addon.build_state(now)
+
+    assert state["status"] == "ferien"
+    assert state["target_date"] == "2026-10-26"
+    assert state["start"] is None
+    assert state["period"] is None
+    assert state["hours_until"] is None
+    assert state["bundesland"] == "Schleswig-Holstein"
+    assert state["holidays_updated"] == now.isoformat()
 
 
 def test_build_state_after_noon_uses_next_day() -> None:
@@ -91,7 +164,23 @@ def test_build_state_after_noon_uses_next_day() -> None:
     assert state["subject"] == "Physik"
 
 
-def test_build_state_without_data_has_no_alarm() -> None:
+def test_hours_until_counts_from_now() -> None:
+    now = datetime(2026, 10, 20, 22, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+    wednesday = date(2026, 10, 21)
+    addon.dataset.days[wednesday] = DayPlan(
+        date=wednesday,
+        lessons=[Lesson(period=1, start=time(7, 45), subject="Englisch", date=wednesday)],
+    )
+
+    state = addon.build_state(now)
+
+    assert state["target_date"] == "2026-10-21"
+    assert state["hours_until"] == 9
+
+
+def test_build_state_without_data_reports_failure() -> None:
     now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
     addon = make_addon()
     addon.last_error = "Noch keine Plandaten"
@@ -99,9 +188,40 @@ def test_build_state_without_data_has_no_alarm() -> None:
     state = addon.build_state(now)
 
     assert state["start"] is None
-    assert state["alarm"] is False
     assert state["status"] == "error"
+    assert state["connection"] == "verbindung fehlgeschlagen"
+    assert state["wecker_morgen"] is False
+    assert state["wecker_morgen_reason"] == "keine Daten"
     assert state["last_error"] == "Noch keine Plandaten"
+
+
+def test_discovery_templates_use_existing_state_keys() -> None:
+    """Jedes ``value_json.<key>`` aus den Vorlagen muss im Status vorhanden sein."""
+    from app.mqtt import discovery_messages
+
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+    state = addon.build_state(now)
+
+    for topic, payload in discovery_messages("homeassistant", "IServ Test", "1.1.0"):
+        template = payload.get("json_attributes_template", "") + payload.get(
+            "value_template", ""
+        )
+        for key in re.findall(r"value_json\.(\w+)", template):
+            assert key in state, f"{topic}: value_json.{key} fehlt im Status"
+
+
+def test_connection_state_reports_progress() -> None:
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    assert addon.connection_state() == "verbinden"
+
+    addon.dataset = make_dataset(now)
+    assert addon.connection_state() == "verbunden"
+
+    addon.last_error = "Login fehlgeschlagen"
+    assert addon.connection_state() == "verbindung fehlgeschlagen"
 
 
 def test_should_refresh_respects_age_and_night() -> None:
@@ -180,6 +300,7 @@ def test_should_refresh_uses_normal_interval_after_filter_error() -> None:
     assert addon.should_refresh(now) is True
 
 
+
 def test_refresh_marks_filter_error_and_keeps_last_dataset() -> None:
     """Der Filterfehler wird erkannt; der letzte gute Stand bleibt erhalten."""
     addon = make_addon()
@@ -210,6 +331,59 @@ def test_refresh_marks_filter_error_and_keeps_last_dataset() -> None:
     assert "Eigenschaft classes" in (addon.last_error or "")
     state = addon.build_state(now)
     assert state["status"] == "ok"
+    assert state["connection"] == "verbindung fehlgeschlagen"
+
+
+def test_refresh_holidays_loads_calendar(monkeypatch) -> None:
+    now = datetime(2026, 10, 21, 8, 0, tzinfo=TZ)
+    calls: list[str] = []
+
+    def fake_load(bundesland, now=None, **kwargs):  # noqa: ARG001 - Testdouble
+        calls.append(bundesland)
+        return HolidayCalendar(
+            bundesland=bundesland,
+            fetched_at=datetime(2026, 10, 21, 8, 0, tzinfo=TZ),
+            ranges=[Holiday(date(2026, 10, 12), date(2026, 10, 24), "Herbstferien")],
+        )
+
+    monkeypatch.setattr(main_module, "load_holidays", fake_load)
+    addon = make_addon(bundesland="Bayern")
+
+    addon.refresh_holidays(now)
+    assert calls == ["Bayern"]
+    assert addon.holidays.bundesland == "Bayern"
+    assert len(addon.holidays.ranges) == 1
+
+    # Innerhalb von sieben Tagen kein weiterer Abruf.
+    addon.refresh_holidays(now + timedelta(days=1))
+    assert calls == ["Bayern"]
+
+    # Nach Ablauf der sieben Tage wird erneut geladen.
+    addon.refresh_holidays(now + timedelta(days=8))
+    assert calls == ["Bayern", "Bayern"]
+
+
+def test_refresh_holidays_waits_after_failure(monkeypatch) -> None:
+    now = datetime(2026, 10, 21, 8, 0, tzinfo=TZ)
+    calls: list[int] = []
+
+    def fake_load(bundesland, now=None, **kwargs):  # noqa: ARG001 - Testdouble
+        calls.append(1)
+        return HolidayCalendar(bundesland=bundesland, warnings=["offline"])
+
+    monkeypatch.setattr(main_module, "load_holidays", fake_load)
+    addon = make_addon()
+
+    addon.refresh_holidays(now)
+    assert len(calls) == 1
+    # Nach einem Fehler erst nach sechs Stunden erneut versuchen.
+    addon.refresh_holidays(now + timedelta(minutes=30))
+    assert len(calls) == 1
+    addon.refresh_holidays(now + timedelta(hours=7))
+    assert len(calls) == 2
+    # Die Warnung bleibt im Status sichtbar.
+    assert addon.holidays.warnings
+
 
 
 def test_cache_roundtrip(tmp_path, monkeypatch) -> None:
@@ -240,6 +414,7 @@ def test_dump_raw_writes_files(tmp_path, monkeypatch) -> None:
     assert (tmp_path / "debug" / "plan_raw.json").exists()
     meta = json.loads((tmp_path / "debug" / "plan_raw.meta.json").read_text(encoding="utf-8"))
     assert meta["content_type"] == "application/json"
+    assert "plan_url" not in meta
 
 
 def test_failed_refresh_dumps_raw_response(tmp_path, monkeypatch) -> None:
@@ -302,38 +477,36 @@ def test_invalid_options_are_reported_but_addon_keeps_running() -> None:
     assert any("iserv_url" in problem for problem in problems)
 
 
+
 def test_supervisor_mqtt_credentials_are_used(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,
         "supervisor_mqtt_config",
         lambda: {
             "host": "core-mosquitto",
-            "port": 1883,
+            "port": 8883,
             "username": "homeassistant",
             "password": "geheim",
-            "ssl": False,
+            "ssl": True,
         },
     )
     options = AddonOptions()
-    Addon._apply_supervisor_mqtt(options)
+    assert Addon._apply_supervisor_mqtt(options) is True
     assert options.mqtt_host == "core-mosquitto"
+    assert options.mqtt_port == 8883
+    assert options.mqtt_ssl is True
     assert options.mqtt_username == "homeassistant"
     assert options.mqtt_password == "geheim"
 
 
-def test_explicit_mqtt_host_is_not_overridden(monkeypatch) -> None:
-    calls: list[int] = []
-
-    def fake_config():
-        calls.append(1)
-        return {"host": "core-mosquitto", "port": 1883, "username": "x", "password": "y", "ssl": False}
-
-    monkeypatch.setattr(main_module, "supervisor_mqtt_config", fake_config)
-    options = AddonOptions(mqtt_host="broker.local", mqtt_username="eigen")
-    Addon._apply_supervisor_mqtt(options)
-    assert options.mqtt_host == "broker.local"
-    assert options.mqtt_username == "eigen"
-    assert calls == []
+def test_without_supervisor_defaults_are_kept(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "supervisor_mqtt_config", lambda: None)
+    options = AddonOptions()
+    assert Addon._apply_supervisor_mqtt(options) is False
+    assert options.mqtt_host == "core-mosquitto"
+    assert options.mqtt_port == 1883
+    assert options.mqtt_ssl is False
+    assert options.mqtt_username == ""
 
 
 def test_refresh_mqtt_credentials_after_auth_error(monkeypatch) -> None:
@@ -359,20 +532,9 @@ def test_refresh_mqtt_credentials_after_auth_error(monkeypatch) -> None:
     }
 
 
-def test_refresh_mqtt_credentials_not_done_for_custom_login(monkeypatch) -> None:
-    monkeypatch.setattr(
-        main_module,
-        "supervisor_mqtt_config",
-        lambda: {
-            "host": "core-mosquitto",
-            "port": 1883,
-            "username": "addons",
-            "password": "y",
-            "ssl": False,
-        },
-    )
-    addon = make_addon(mqtt_username="eigen", mqtt_password="geheim")
-
-    assert addon.publisher.options.mqtt_username == "eigen"
+def test_refresh_mqtt_credentials_without_supervisor() -> None:
+    """Ohne Supervisor-Zugang gibt es nichts zu erneuern."""
+    addon = make_addon()
+    assert addon.options.mqtt_username == ""
     assert addon._refresh_mqtt_credentials() is None
 

@@ -7,51 +7,59 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .plan import FreeDay, parse_free_days, parse_period_times
+from .holidays import DEFAULT_BUNDESLAND, normalize_bundesland
+from .plan import parse_period_times
 
 OPTIONS_PATH = Path(os.environ.get("ISERV_OPTIONS", "/data/options.json"))
 DEFAULT_URL = "https://schule.example.org"
+DEFAULT_MQTT_HOST = "core-mosquitto"
+DEFAULT_DISCOVERY_PREFIX = "homeassistant"
+DEVICE_NAME = "IServ Stundenplan"
+
+# Nur diese Schluessel duerfen aus /data/options.json kommen. Alles andere
+# (alte Optionen wie plan_url, free_days, mqtt_*, verify_ssl, log_level)
+# wird bewusst ignoriert - MQTT und TLS kommen vom Supervisor.
+USER_OPTION_FIELDS = (
+    "iserv_url",
+    "username",
+    "password",
+    "bundesland",
+    "period_times",
+    "refresh_minutes",
+    "debug_dump",
+)
 
 
 @dataclass
 class AddonOptions:
     iserv_url: str = DEFAULT_URL
-    plan_url: str = ""
     username: str = ""
     password: str = ""
-    plan_format: str = "auto"
-    klasse: str = ""
-    free_days: str = ""
+    bundesland: str = DEFAULT_BUNDESLAND
     period_times: str = ""
-    lookahead_days: int = 21
     refresh_minutes: int = 30
-    mqtt_host: str = "core-mosquitto"
+    debug_dump: bool = False
+    # Laufzeitwerte: werden zur Laufzeit vom Supervisor gefuellt.
+    mqtt_host: str = DEFAULT_MQTT_HOST
     mqtt_port: int = 1883
     mqtt_ssl: bool = False
     mqtt_username: str = ""
     mqtt_password: str = ""
-    mqtt_discovery_prefix: str = "homeassistant"
-    verify_ssl: bool = True
-    debug_dump: bool = False
-    log_level: str = "info"
-    device_name: str = "IServ Stundenplan"
-    parsed_free_days: list[FreeDay] = field(default_factory=list)
+    mqtt_discovery_prefix: str = DEFAULT_DISCOVERY_PREFIX
+    device_name: str = DEVICE_NAME
     parsed_period_times: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.iserv_url = _normalize_url(self.iserv_url)
-        self.plan_url = (self.plan_url or "").strip()
-        fmt = (self.plan_format or "auto").lower()
-        self.plan_format = fmt if fmt in ("auto", "html", "json", "ics") else "auto"
-        self.lookahead_days = max(1, min(int(self.lookahead_days or 21), 60))
+        self.bundesland = normalize_bundesland(self.bundesland)
         self.refresh_minutes = max(5, min(int(self.refresh_minutes or 30), 720))
-        self.mqtt_port = int(self.mqtt_port or 1883)
-        self.mqtt_ssl = _as_bool(self.mqtt_ssl)
-        self.verify_ssl = _as_bool(self.verify_ssl, default=True)
         self.debug_dump = _as_bool(self.debug_dump)
-        self.mqtt_discovery_prefix = (self.mqtt_discovery_prefix or "homeassistant").strip("/") or "homeassistant"
-        self.parsed_free_days = parse_free_days(self.free_days)
         self.parsed_period_times = parse_period_times(self.period_times)
+
+    @property
+    def log_level(self) -> str:
+        """Log-Level automatisch: Debug-Dump braucht Details, sonst info."""
+        return "debug" if self.debug_dump else "info"
 
     def validate(self) -> list[str]:
         problems: list[str] = []
@@ -83,26 +91,25 @@ def _as_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
-def _coerce(raw: dict) -> dict:
-    """Supervisor liefert Zahlen/Bools je nach Schema korrekt; Strings defensiv casten."""
-    result = dict(raw)
-    for key in ("lookahead_days", "refresh_minutes", "mqtt_port"):
-        if key in result:
-            try:
-                result[key] = int(result[key])
-            except (TypeError, ValueError):
-                result.pop(key)
-    for key in ("verify_ssl", "debug_dump", "mqtt_ssl"):
-        if key in result:
-            result[key] = _as_bool(result[key], default=key == "verify_ssl")
-    return result
-
-
 def load_options(path: Path | None = None) -> AddonOptions:
     target = path or OPTIONS_PATH
-    raw: dict = {}
+    raw: object = {}
     if target.exists():
         raw = json.loads(target.read_text(encoding="utf-8"))
-    known = {field_name for field_name in AddonOptions.__dataclass_fields__}
-    data = {key: value for key, value in _coerce(raw).items() if key in known}
+    if not isinstance(raw, dict):
+        raw = {}
+    data: dict = {}
+    for key in USER_OPTION_FIELDS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key == "refresh_minutes":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+        elif key == "debug_dump":
+            value = _as_bool(value)
+        data[key] = value
     return AddonOptions(**data)
+

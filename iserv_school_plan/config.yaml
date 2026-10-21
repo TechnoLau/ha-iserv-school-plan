@@ -1,10 +1,10 @@
 name: IServ Stundenplan
-version: "1.0.12"
+version: "1.1.0"
 slug: iserv_school_plan
 description: >-
-  Liest den IServ-Stundenplan (HTML, JSON oder ICS) und stellt Stundenbeginn,
-  erste Unterrichtsstunde, naechsten Schultag und Schulwecker als
-  MQTT-Entities in Home Assistant bereit.
+  Liest den IServ-Stundenplan automatisch ein und stellt Status, erste
+  Unterrichtsstunde, naechsten Schultag und "Wecker morgen" als MQTT-Entities
+  in Home Assistant bereit. Ferien und Feiertage werden automatisch geladen.
 url: https://github.com/TechnoLau/ha-iserv-school-plan
 arch:
   - amd64
@@ -17,43 +17,17 @@ services:
   - mqtt:want
 options:
   iserv_url: https://schule.example.org
-  plan_url: ""
   username: ""
   password: ""
-  plan_format: auto
-  klasse: ""
-  free_days: ""
+  bundesland: Schleswig-Holstein
   period_times: "1=07:45-08:30;2=08:35-09:20;3=09:50-10:35;4=10:40-11:25;5=11:30-12:15;6=12:20-13:05"
-  lookahead_days: 21
   refresh_minutes: 30
-  mqtt_host: core-mosquitto
-  mqtt_port: 1883
-  mqtt_ssl: false
-  mqtt_username: ""
-  mqtt_password: ""
-  mqtt_discovery_prefix: homeassistant
-  device_name: IServ Stundenplan
-  verify_ssl: true
   debug_dump: false
-  log_level: info
 schema:
   iserv_url: url
-  plan_url: str?
   username: str?
   password: password?
-  plan_format: list(auto|html|json|ics)
-  klasse: str?
-  free_days: str?
+  bundesland: list(Baden-Württemberg|Bayern|Berlin|Brandenburg|Bremen|Hamburg|Hessen|Mecklenburg-Vorpommern|Niedersachsen|Nordrhein-Westfalen|Rheinland-Pfalz|Saarland|Sachsen|Sachsen-Anhalt|Schleswig-Holstein|Thüringen)
   period_times: str?
-  lookahead_days: int(1,60)
   refresh_minutes: int(5,720)
-  mqtt_host: str
-  mqtt_port: port
-  mqtt_ssl: bool
-  mqtt_username: str?
-  mqtt_password: password?
-  mqtt_discovery_prefix: str
-  device_name: str
-  verify_ssl: bool
   debug_dump: bool
-  log_level: list(debug|info|warning|error)

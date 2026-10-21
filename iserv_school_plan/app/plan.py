@@ -13,14 +13,10 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Berlin")
 NOON = time(12, 0)
-# Freitag und Samstag: laut Wochenendregel wird kein Wecker gestellt.
-WEEKEND = (4, 5)
-SUNDAY = 6
 
 STATUS_OK = "ok"
 STATUS_FERIEN = "ferien"
 STATUS_KEIN_UNTERRICHT = "kein_unterricht"
-STATUS_WOCHENENDE = "wochenende"
 STATUS_ERROR = "error"
 
 
@@ -174,15 +170,33 @@ class PlanDataset:
 
 
 @dataclass(frozen=True)
-class FreeDay:
-    """Konfigurierter schulfreier Tag (Ferien, Feiertag, beweglicher Ferientag)."""
+class Holiday:
+    """Ferien- oder Feiertagszeitraum (aus dem Holiday-Kalender des Add-ons)."""
 
     start: date
     end: date
     name: str = ""
+    kind: str = "ferien"  # ferien | feiertag
 
     def contains(self, day: date) -> bool:
         return self.start <= day <= self.end
+
+    def to_dict(self) -> dict:
+        return {
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "name": self.name,
+            "kind": self.kind,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Holiday":
+        return cls(
+            start=date.fromisoformat(data["start"]),
+            end=date.fromisoformat(data["end"]),
+            name=data.get("name") or "",
+            kind=data.get("kind") or "ferien",
+        )
 
 
 @dataclass
@@ -198,7 +212,6 @@ class PlanResult:
     target_date: date | None = None
     first_lesson: Lesson | None = None
     start: datetime | None = None
-    alarm: bool = False
     reason: str = ""
     day: DayPlan | None = None
     skipped: list[Skip] = field(default_factory=list)
@@ -213,39 +226,19 @@ class PlanResult:
         return self.day.cancelled_periods if self.day else []
 
 
-def parse_date(value: str) -> date:
-    """Akzeptiert ISO (2026-10-22) und deutsches Format (22.10.2026)."""
-    value = value.strip()
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"):
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"Ungueltiges Datum: {value!r}")
+@dataclass
+class TomorrowPlan:
+    """Antwort auf die Frage: ist morgen (Kalendertag) Schule?"""
 
+    date: date
+    school: bool = False
+    first_lesson: Lesson | None = None
+    start: datetime | None = None
+    reason: str = ""
 
-def parse_free_days(spec: str | None) -> list[FreeDay]:
-    """Parst ``2026-07-06..2026-08-14:Ferien;2026-10-03:Feiertag``."""
-    if not spec:
-        return []
-    entries: list[FreeDay] = []
-    for raw in spec.replace("\n", ";").split(";"):
-        chunk = raw.strip()
-        if not chunk:
-            continue
-        name = ""
-        if ":" in chunk:
-            chunk, name = chunk.split(":", 1)
-            name = name.strip()
-        if ".." in chunk:
-            start_raw, end_raw = chunk.split("..", 1)
-            start, end = parse_date(start_raw), parse_date(end_raw)
-        else:
-            start = end = parse_date(chunk)
-        if end < start:
-            start, end = end, start
-        entries.append(FreeDay(start=start, end=end, name=name))
-    return entries
+    @property
+    def period(self) -> int | None:
+        return self.first_lesson.period if self.first_lesson else None
 
 
 def parse_period_times(spec: str | None) -> dict[int, tuple[time, time | None]]:
@@ -298,8 +291,9 @@ def apply_period_times(
     return dataset
 
 
-def match_free_day(day: date, free_days: list[FreeDay]) -> FreeDay | None:
-    for entry in free_days:
+def find_holiday(day: date, holidays: list[Holiday] | None) -> Holiday | None:
+    """Erster Ferien-/Feiertagseintrag, der den Tag abdeckt."""
+    for entry in holidays or []:
         if entry.contains(day):
             return entry
     return None
@@ -309,50 +303,47 @@ def _planned_first(day: DayPlan) -> int | None:
     return day.first_planned_period()
 
 
-def _weekend_result(
-    skipped: list[Skip], reason: str, target_date: date | None = None
-) -> PlanResult:
-    return PlanResult(
-        status=STATUS_WOCHENENDE,
-        target_date=target_date,
-        alarm=False,
-        reason=reason,
-        skipped=skipped,
+def _first_timed(lessons: list[Lesson]) -> Lesson | None:
+    orders = sorted(
+        (lesson for lesson in lessons if lesson.start is not None),
+        key=lambda lesson: (lesson.start, lesson.period or 99),
     )
+    return orders[0] if orders else None
+
+
+def _start_datetime(day: date, lesson: Lesson | None) -> datetime | None:
+    if lesson is None or lesson.start is None:
+        return None
+    return datetime.combine(day, lesson.start, tzinfo=TZ)
+
+
+def _local(now: datetime) -> datetime:
+    if now.tzinfo is None:
+        return now.replace(tzinfo=TZ)
+    return now.astimezone(TZ)
 
 
 def select_plan(
     now: datetime,
     dataset: PlanDataset | None,
-    free_days: list[FreeDay] | None = None,
+    holidays: list[Holiday] | None = None,
     lookahead_days: int = 21,
-    skip_empty_days: bool = True,
 ) -> PlanResult:
-    """Ermittelt den relevanten Schultag und die erste stattfindende Stunde.
+    """Ermittelt den naechsten Schultag mit stattfindender Stunde.
 
     Regeln:
-    * Freitag/Samstag: kein Wecker (Wochenendregel), nur Info-Datum.
-    * Sonntag: Montag (bzw. naechsten Schultag) vorbereiten.
-    * Mo-Do vor 12:00: heutiger Tag; ab 12:00: Folgetag.
-    * Schulfreie Tage (Ferien/Feiertage/Wochenende/leere Tage) werden uebersprungen.
-    * Unbekannte Daten fuehren nie zu einem Wecker.
+    * Mo-Do vor 12:00: heutiger Tag; ab 12:00 (und am Wochenende): Folgetag.
+    * Wochenende, Ferien/Feiertage und Tage ohne stattfindende Stunde werden
+      uebersprungen; der Ferien-/Feiertagskalender greift nur fuer Tage, fuer
+      die IServ gar keine Daten liefert (Daten haben immer Vorrang).
+    * Fehlende Daten fuehren nie zu einer geratenen Startzeit.
     """
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=TZ)
-    else:
-        now = now.astimezone(TZ)
-
+    now = _local(now)
     today = now.date()
-    weekday = today.weekday()
-    info_only = weekday in WEEKEND
-    free_days = free_days or []
-
-    if weekday in WEEKEND or weekday == SUNDAY:
+    if today.weekday() >= 5 or now.time() >= NOON:
         start = today + timedelta(days=1)
-    elif now.time() < NOON:
-        start = today
     else:
-        start = today + timedelta(days=1)
+        start = today
 
     skipped: list[Skip] = []
     last_checked = start
@@ -365,85 +356,52 @@ def select_plan(
             skipped.append(Skip(day, "Wochenende", "weekend"))
             continue
 
-        free = match_free_day(day, free_days)
-        if free:
-            skipped.append(Skip(day, free.name or "schulfrei", "ferien"))
-            continue
-
         day_plan = dataset.lookup(day) if dataset else None
-        if day_plan is None:
-            if info_only:
-                return _weekend_result(skipped, "Wochenendregel: kein Wecker", day)
-            # Keine belastbaren Daten: keinen Wecker stellen und nicht raten.
-            skipped.append(Skip(day, "keine Daten", "unknown"))
-            break
+        held = day_plan.held_lessons if day_plan else []
+        holiday = find_holiday(day, holidays)
 
-        if day_plan.is_school_day is False:
-            skipped.append(Skip(day, day_plan.holiday_name or "schulfrei", "ferien"))
-            continue
-
-        held = day_plan.held_lessons
-        if not held:
-            if day_plan.lessons:
-                skipped.append(Skip(day, "alle Stunden entfallen", "kein_unterricht"))
-                continue
-            if skip_empty_days:
-                skipped.append(Skip(day, "kein Unterricht", "kein_unterricht"))
-                continue
-            if info_only:
+        if held:
+            first = _first_timed(held)
+            if first is None:
                 return PlanResult(
-                    status=STATUS_WOCHENENDE,
+                    status=STATUS_ERROR,
                     target_date=day,
                     day=day_plan,
-                    alarm=False,
-                    reason="Wochenendregel: kein Wecker",
+                    reason="Startzeit der ersten Stunde unbekannt",
                     skipped=skipped,
                     planned_first_period=_planned_first(day_plan),
                 )
             return PlanResult(
-                status=STATUS_KEIN_UNTERRICHT,
+                status=STATUS_OK,
                 target_date=day,
+                first_lesson=first,
+                start=_start_datetime(day, first),
+                reason="Erste stattfindende Stunde",
                 day=day_plan,
-                alarm=False,
-                reason="Keine stattfindende Stunde",
                 skipped=skipped,
                 planned_first_period=_planned_first(day_plan),
             )
 
-        timed = sorted(
-            (lesson for lesson in held if lesson.start is not None),
-            key=lambda lesson: (lesson.start, lesson.period or 99),
-        )
-        if not timed:
-            if info_only:
-                return _weekend_result(skipped, "Wochenendregel: kein Wecker", day)
-            return PlanResult(
-                status=STATUS_ERROR,
-                target_date=day,
-                day=day_plan,
-                alarm=False,
-                reason="Startzeit der ersten Stunde unbekannt",
-                skipped=skipped,
-                planned_first_period=_planned_first(day_plan),
+        if day_plan is not None and day_plan.is_school_day is False:
+            skipped.append(
+                Skip(
+                    day,
+                    day_plan.holiday_name or (holiday.name if holiday else "schulfrei"),
+                    "ferien",
+                )
             )
-
-        first = timed[0]
-        start_dt = datetime.combine(day, first.start, tzinfo=TZ)  # type: ignore[arg-type]
-
-        return PlanResult(
-            status=STATUS_WOCHENENDE if info_only else STATUS_OK,
-            target_date=day,
-            first_lesson=first,
-            start=None if info_only else start_dt,
-            alarm=not info_only,
-            reason="Wochenendregel: kein Wecker" if info_only else "Erste stattfindende Stunde",
-            day=day_plan,
-            skipped=skipped,
-            planned_first_period=_planned_first(day_plan),
-        )
-
-    if info_only:
-        return _weekend_result(skipped, "Wochenendregel: kein Wecker", last_checked)
+            continue
+        if day_plan is not None and day_plan.lessons:
+            skipped.append(Skip(day, "alle Stunden entfallen", "kein_unterricht"))
+            continue
+        if holiday is not None:
+            # Kein Plan-Eintrag fuer diesen Tag: Ferien/Feiertag gilt.
+            skipped.append(Skip(day, holiday.name or "schulfrei", "ferien"))
+            continue
+        if day_plan is None:
+            skipped.append(Skip(day, "keine Daten", "unknown"))
+            break
+        skipped.append(Skip(day, "kein Unterricht", "kein_unterricht"))
 
     kinds = {entry.kind for entry in skipped}
     if "unknown" in kinds:
@@ -452,14 +410,12 @@ def select_plan(
             return PlanResult(
                 status=STATUS_FERIEN,
                 target_date=unknown.date,
-                alarm=False,
                 reason=f"Schulfrei bis {unknown.date.isoformat()}, danach keine Daten",
                 skipped=skipped,
             )
         return PlanResult(
             status=STATUS_ERROR,
             target_date=unknown.date,
-            alarm=False,
             reason=f"Keine Daten fuer {unknown.date.isoformat()}",
             skipped=skipped,
         )
@@ -467,17 +423,63 @@ def select_plan(
         return PlanResult(
             status=STATUS_FERIEN,
             target_date=last_checked,
-            alarm=False,
             reason="Nur schulfreie Tage im Vorschauzeitraum",
             skipped=skipped,
         )
     return PlanResult(
         status=STATUS_KEIN_UNTERRICHT,
         target_date=last_checked,
-        alarm=False,
         reason="Kein Unterricht im Vorschauzeitraum",
         skipped=skipped,
     )
 
 
+def plan_tomorrow(
+    now: datetime,
+    dataset: PlanDataset | None,
+    holidays: list[Holiday] | None = None,
+) -> TomorrowPlan:
+    """Prueft den morgigen Kalendertag ("Wecker morgen" ja/nein)."""
+    tomorrow = _local(now).date() + timedelta(days=1)
+    if tomorrow.weekday() >= 5:
+        return TomorrowPlan(tomorrow, reason="Wochenende")
 
+    day_plan = dataset.lookup(tomorrow) if dataset else None
+    held = day_plan.held_lessons if day_plan else []
+    if held:
+        first = _first_timed(held)
+        if first is None:
+            return TomorrowPlan(
+                tomorrow,
+                school=True,
+                first_lesson=held[0],
+                reason="Startzeit der ersten Stunde unbekannt",
+            )
+        return TomorrowPlan(
+            tomorrow,
+            school=True,
+            first_lesson=first,
+            start=_start_datetime(tomorrow, first),
+            reason="Unterricht",
+        )
+
+    holiday = find_holiday(tomorrow, holidays)
+    if day_plan is not None and day_plan.is_school_day is False:
+        return TomorrowPlan(
+            tomorrow, reason=day_plan.holiday_name or (holiday.name if holiday else "schulfrei")
+        )
+    if day_plan is not None and day_plan.lessons:
+        return TomorrowPlan(tomorrow, reason="alle Stunden entfallen")
+    if holiday is not None:
+        return TomorrowPlan(tomorrow, reason=holiday.name or "schulfrei")
+    if day_plan is None:
+        return TomorrowPlan(tomorrow, reason="keine Daten")
+    return TomorrowPlan(tomorrow, reason="kein Unterricht")
+
+
+def hours_until(now: datetime, start: datetime | None) -> int | None:
+    """Ganze Stunden bis zum Beginn (0, wenn er schon begonnen hat)."""
+    if start is None:
+        return None
+    seconds = int((start - _local(now)).total_seconds())
+    return 0 if seconds < 0 else seconds // 3600

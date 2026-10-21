@@ -32,18 +32,30 @@ DEVICE = {
 }
 
 ATTRIBUTES = {
-    "start": "{{ {'period': value_json.period, 'subject': value_json.subject, "
-    "'room': value_json.room, 'reason': value_json.reason} | tojson }}",
-    "period": "{{ {'subject': value_json.subject, 'room': value_json.room, "
+    "status": "{{ {'reason': value_json.reason, 'plan_status': value_json.status, "
+    "'bundesland': value_json.bundesland, 'holidays_updated': value_json.holidays_updated, "
+    "'fetched_at': value_json.fetched_at, 'age_minutes': value_json.data_age_minutes, "
+    "'mqtt_connected': value_json.mqtt_connected, 'iserv_url': value_json.iserv_url, "
+    "'last_error': value_json.last_error, 'skipped': value_json.skipped, "
+    "'warnings': value_json.warnings} | tojson }}",
+    "lesson": "{{ {'start': value_json.start, 'start_iso': value_json.start_iso, "
+    "'hours_until': value_json.hours_until, 'target_date': value_json.target_date, "
+    "'subject': value_json.subject, 'room': value_json.room, "
     "'planned_first_period': value_json.planned_first_period, "
     "'cancelled_periods': value_json.cancelled_periods} | tojson }}",
-    "date": "{{ {'reason': value_json.reason, 'status': value_json.status} | tojson }}",
-    "alarm": "{{ {'reason': value_json.reason, 'start': value_json.start, "
-    "'target_date': value_json.target_date} | tojson }}",
-    "status": "{{ {'reason': value_json.reason, 'fetched_at': value_json.fetched_at, "
-    "'age_minutes': value_json.data_age_minutes, 'skipped': value_json.skipped, "
-    "'warnings': value_json.warnings, 'last_error': value_json.last_error} | tojson }}",
+    "date": "{{ {'reason': value_json.reason, 'status': value_json.status, "
+    "'cancelled_periods': value_json.cancelled_periods} | tojson }}",
+    "morgen": "{{ {'date': value_json.wecker_morgen_date, "
+    "'start': value_json.wecker_morgen_start, 'period': value_json.wecker_morgen_period, "
+    "'subject': value_json.wecker_morgen_subject, 'room': value_json.wecker_morgen_room, "
+    "'reason': value_json.wecker_morgen_reason, 'plan_status': value_json.status} | tojson }}",
 }
+
+# Entities aus 1.0.x: leere retained Payloads entfernen sie aus Home Assistant.
+REMOVED_DISCOVERY = (
+    ("sensor", "iserv_stundenbeginn"),
+    ("binary_sensor", "iserv_schulwecker"),
+)
 
 
 def discovery_messages(prefix: str, device_name: str, version: str) -> list[tuple[str, dict]]:
@@ -64,9 +76,9 @@ def discovery_messages(prefix: str, device_name: str, version: str) -> list[tupl
                 "device": device,
                 "unique_id": unique_id,
                 # Seit HA 2026.4 bestimmt default_entity_id die Entity-ID
-                # (z. B. sensor.stundenbeginn). object_id ist der alte Schluessel
-                # fuer aeltere Versionen; unbekannte Schluessel entfernt das
-                # Discovery-Schema (extra=REMOVE_EXTRA), daher sind beide sicher.
+                # (z. B. sensor.stundenplan_status). object_id ist der alte
+                # Schluessel fuer aeltere Versionen; unbekannte Schluessel
+                # entfernt das Discovery-Schema (extra=REMOVE_EXTRA).
                 "default_entity_id": f"{component}.{object_id}",
                 "object_id": object_id,
                 **payload,
@@ -76,27 +88,26 @@ def discovery_messages(prefix: str, device_name: str, version: str) -> list[tupl
     return [
         config(
             "sensor",
-            "iserv_stundenbeginn",
+            "iserv_status",
             {
-                "name": "Stundenbeginn",
-                "device_class": "timestamp",
-                "icon": "mdi:clock-start",
-                "value_template": "{{ value_json.start if value_json.start else 'unknown' }}",
+                "name": "Stundenplan Status",
+                "icon": "mdi:lan-connect",
+                "value_template": "{{ value_json.connection }}",
                 "json_attributes_topic": STATE_TOPIC,
-                "json_attributes_template": ATTRIBUTES["start"],
+                "json_attributes_template": ATTRIBUTES["status"],
             },
-            object_id="stundenbeginn",
+            object_id="stundenplan_status",
         ),
         config(
             "sensor",
             "iserv_erste_stunde",
             {
                 "name": "Erste Unterrichtsstunde",
-                "icon": "mdi:book-open-variant",
+                "icon": "mdi:clock-start",
                 "value_template": "{{ value_json.period if value_json.period is not none "
                 "else 'unknown' }}",
                 "json_attributes_topic": STATE_TOPIC,
-                "json_attributes_template": ATTRIBUTES["period"],
+                "json_attributes_template": ATTRIBUTES["lesson"],
             },
             object_id="erste_unterrichtsstunde",
         ),
@@ -116,31 +127,24 @@ def discovery_messages(prefix: str, device_name: str, version: str) -> list[tupl
         ),
         config(
             "binary_sensor",
-            "iserv_schulwecker",
+            "iserv_wecker_morgen",
             {
-                "name": "Schulwecker aktiv",
+                "name": "Wecker morgen",
                 "icon": "mdi:alarm",
                 "payload_on": "ON",
                 "payload_off": "OFF",
-                "value_template": "{{ 'ON' if value_json.alarm else 'OFF' }}",
+                "value_template": "{{ 'ON' if value_json.wecker_morgen else 'OFF' }}",
                 "json_attributes_topic": STATE_TOPIC,
-                "json_attributes_template": ATTRIBUTES["alarm"],
+                "json_attributes_template": ATTRIBUTES["morgen"],
             },
-            object_id="schulwecker_aktiv",
-        ),
-        config(
-            "sensor",
-            "iserv_status",
-            {
-                "name": "Stundenplan Status",
-                "icon": "mdi:information-outline",
-                "value_template": "{{ value_json.status }}",
-                "json_attributes_topic": STATE_TOPIC,
-                "json_attributes_template": ATTRIBUTES["status"],
-            },
-            object_id="stundenplan_status",
+            object_id="wecker_morgen",
         ),
     ]
+
+
+def removed_discovery_topics(prefix: str) -> list[str]:
+    """Discovery-Topics der Entities aus 1.0.x (werden mit leerem Payload geloescht)."""
+    return [f"{prefix}/{component}/{unique_id}/config" for component, unique_id in REMOVED_DISCOVERY]
 
 
 def supervisor_mqtt_config() -> dict | None:
@@ -258,6 +262,8 @@ class MqttPublisher:
         self._credential_refreshes = 0
         _LOGGER.info("MQTT verbunden")
         client.publish(AVAILABILITY_TOPIC, "online", retain=True)
+        for topic in removed_discovery_topics(self.options.mqtt_discovery_prefix):
+            client.publish(topic, "", qos=1, retain=True)
         for topic, payload in discovery_messages(
             self.options.mqtt_discovery_prefix, self.options.device_name, self.version
         ):

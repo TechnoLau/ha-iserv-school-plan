@@ -13,47 +13,49 @@ from app.mqtt import (
     STATE_TOPIC,
     MqttPublisher,
     discovery_messages,
+    removed_discovery_topics,
 )
 
 
 def test_discovery_topics_and_payloads() -> None:
-    messages = discovery_messages("homeassistant", "IServ Test", "1.0.0")
+    messages = discovery_messages("homeassistant", "IServ Test", "1.1.0")
     topics = {topic: payload for topic, payload in messages}
 
     assert set(topics) == {
-        "homeassistant/sensor/iserv_stundenbeginn/config",
+        "homeassistant/sensor/iserv_status/config",
         "homeassistant/sensor/iserv_erste_stunde/config",
         "homeassistant/sensor/iserv_naechster_schultag/config",
-        "homeassistant/binary_sensor/iserv_schulwecker/config",
-        "homeassistant/sensor/iserv_status/config",
+        "homeassistant/binary_sensor/iserv_wecker_morgen/config",
     }
 
-    start = topics["homeassistant/sensor/iserv_stundenbeginn/config"]
-    assert start["device_class"] == "timestamp"
-    assert start["state_topic"] == STATE_TOPIC
-    assert start["availability_topic"] == AVAILABILITY_TOPIC
-    assert start["device"]["name"] == "IServ Test"
-    assert start["device"]["sw_version"] == "1.0.0"
-    assert "value_json.start" in start["value_template"]
+    status = topics["homeassistant/sensor/iserv_status/config"]
+    assert status["state_topic"] == STATE_TOPIC
+    assert status["availability_topic"] == AVAILABILITY_TOPIC
+    assert status["device"]["name"] == "IServ Test"
+    assert status["device"]["sw_version"] == "1.1.0"
+    assert "value_json.connection" in status["value_template"]
 
-    alarm = topics["homeassistant/binary_sensor/iserv_schulwecker/config"]
-    assert alarm["payload_on"] == "ON"
-    assert alarm["payload_off"] == "OFF"
+    first = topics["homeassistant/sensor/iserv_erste_stunde/config"]
+    assert "value_json.period" in first["value_template"]
+    assert "hours_until" in first["json_attributes_template"]
+
+    morning = topics["homeassistant/binary_sensor/iserv_wecker_morgen/config"]
+    assert morning["payload_on"] == "ON"
+    assert morning["payload_off"] == "OFF"
+    assert "value_json.wecker_morgen" in morning["value_template"]
+    assert "wecker_morgen_start" in morning["json_attributes_template"]
 
     unique_ids = [payload["unique_id"] for payload in topics.values()]
     assert len(unique_ids) == len(set(unique_ids))
 
 
 def test_discovery_entity_ids_match_documented_entity_ids() -> None:
-    topics = dict(discovery_messages("homeassistant", "IServ Test", "1.0.0"))
+    topics = dict(discovery_messages("homeassistant", "IServ Test", "1.1.0"))
     expected = {
-        "homeassistant/sensor/iserv_stundenbeginn/config": "sensor.stundenbeginn",
+        "homeassistant/sensor/iserv_status/config": "sensor.stundenplan_status",
         "homeassistant/sensor/iserv_erste_stunde/config": "sensor.erste_unterrichtsstunde",
         "homeassistant/sensor/iserv_naechster_schultag/config": "sensor.naechster_schultag",
-        "homeassistant/binary_sensor/iserv_schulwecker/config": (
-            "binary_sensor.schulwecker_aktiv"
-        ),
-        "homeassistant/sensor/iserv_status/config": "sensor.stundenplan_status",
+        "homeassistant/binary_sensor/iserv_wecker_morgen/config": "binary_sensor.wecker_morgen",
     }
     for topic, entity_id in expected.items():
         payload = topics[topic]
@@ -64,6 +66,32 @@ def test_discovery_entity_ids_match_documented_entity_ids() -> None:
         assert payload["object_id"] == object_id
         # Die Domain muss zum Discovery-Component passen.
         assert topic.split("/")[1] == domain
+
+
+def test_removed_entities_are_deleted_with_empty_payload() -> None:
+    topics = removed_discovery_topics("homeassistant")
+    assert topics == [
+        "homeassistant/sensor/iserv_stundenbeginn/config",
+        "homeassistant/binary_sensor/iserv_schulwecker/config",
+    ]
+
+    publisher = MqttPublisher(AddonOptions(), "1.1.0")
+    published: list[tuple] = []
+
+    class FakeClient:
+        def publish(self, topic, payload, qos=0, retain=False):
+            published.append((topic, payload, qos, retain))
+
+    publisher._on_connect(FakeClient(), None, {}, 0)
+
+    removed = {topic for topic in topics}
+    for topic, payload, qos, retain in published:
+        if topic in removed:
+            assert payload == ""
+            assert retain is True
+            assert qos == 1
+    assert removed <= {topic for topic, *_ in published}
+
 
 
 def test_discovery_payloads_are_json_serialisable() -> None:

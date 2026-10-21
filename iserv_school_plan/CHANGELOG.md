@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.1.0
+
+**Neue Entities und weniger Optionen – bitte Automatisierungen anpassen.**
+
+- Konfiguration auf sieben Optionen reduziert: `iserv_url`, `username`,
+  `password`, `bundesland`, `period_times`, `refresh_minutes`, `debug_dump`.
+  Entfallen sind `plan_url`, `plan_format`, `klasse`, `free_days`,
+  `lookahead_days`, alle `mqtt_*`-Optionen, `verify_ssl`, `log_level` und
+  `device_name`. Alte Schluessel in `/data/options.json` werden ignoriert.
+- Die Plantabelle wird immer automatisch gesucht, die SSL-Pruefung ist immer
+  aktiv, und das Log-Level folgt `debug_dump` (`true` = debug).
+- MQTT kommt ausschliesslich vom Supervisor (`mqtt:want`): Host, Port, TLS und
+  Zugangsdaten des Mosquitto-Add-ons werden automatisch uebernommen.
+- Ferien und Feiertage werden automatisch von openholidaysapi.org geladen
+  (Option `bundesland`, kein API-Key, sieben Tage Cache in
+  `/data/holidays.json`). Ohne Internet gelten die gespeicherten Daten weiter;
+  IServ-Stunden haben immer Vorrang vor dem Kalender.
+- Vier Entities:
+  - `sensor.stundenplan_status`: `verbinden`, `verbunden` oder
+    `verbindung fehlgeschlagen`
+  - `sensor.erste_unterrichtsstunde`: Stundennummer, Attribute `start`,
+    `start_iso`, `hours_until`, `target_date`, `subject`, `room`,
+    `cancelled_periods`
+  - `sensor.naechster_schultag`: Datum
+  - `binary_sensor.wecker_morgen`: `on` nur, wenn morgen ein Schultag mit
+    stattfindender Stunde ist
+- `sensor.stundenbeginn` und `binary_sensor.schulwecker_aktiv` entfallen; ihre
+  Discovery-Topics werden beim Start mit leerem Payload geloescht.
+- Wochenend-/Freitagsregel entfernt: Freitag und Samstag sind normale Tage,
+  Samstag/Sonntag liefern den Montag mit echter erster Stunde. Weiter gilt
+  Mo-Do vor 12:00 Uhr der heutige Tag, ab 12:00 Uhr der Folgetag.
+
+### Migration von 1.0.x
+
+1. Add-on aktualisieren und die Optionen pruefen: `plan_url`, `free_days`,
+   `mqtt_*`, `verify_ssl`, `log_level` und `device_name` verschwinden, neu ist
+   `bundesland`.
+2. `sensor.stundenbeginn` durch `sensor.erste_unterrichtsstunde` ersetzen: die
+   Uhrzeit steht im Attribut `start` (`07:45`) bzw. `start_iso`.
+3. `binary_sensor.schulwecker_aktiv` durch `binary_sensor.wecker_morgen`
+   ersetzen (bedeutet jetzt: morgen ist Schule).
+
+```yaml
+automation:
+  - alias: "Schulwecker stellen"
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.wecker_morgen
+        to: "on"
+    actions:
+      - action: notify.mobile_app_mein_handy
+        data:
+          message: >-
+            Morgen {{ state_attr('binary_sensor.wecker_morgen', 'start') }} Uhr:
+            {{ state_attr('binary_sensor.wecker_morgen', 'subject') or 'Unterricht' }}
+```
+
 ## 1.0.12
 
 - Fehler aus 1.0.11 behoben: Der Filter der JSON-Schnittstelle enthielt nur

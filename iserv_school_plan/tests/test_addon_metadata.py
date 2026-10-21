@@ -8,7 +8,8 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-from app.config import AddonOptions  # noqa: E402 - erst nach importorskip
+from app.config import USER_OPTION_FIELDS, AddonOptions  # noqa: E402 - erst nach importorskip
+from app.holidays import BUNDESLAENDER  # noqa: E402 - erst nach importorskip
 from app.main import VERSION  # noqa: E402 - erst nach importorskip
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
@@ -31,14 +32,23 @@ def test_options_match_schema_and_dataclass() -> None:
     config = load_config()
     options = set(config["options"])
     assert options == set(config["schema"])
+    # Genau die sieben Optionen aus 1.1.0 - alte Schluessel sind entfernt.
+    assert options == set(USER_OPTION_FIELDS)
     assert options <= set(AddonOptions.__dataclass_fields__)
 
 
 def test_default_options_are_valid() -> None:
     options = AddonOptions(**load_config()["options"])
-    assert options.plan_format == "auto"
+    assert options.bundesland == "Schleswig-Holstein"
     assert options.refresh_minutes >= 5
-    assert options.mqtt_discovery_prefix == "homeassistant"
+    assert options.log_level == "info"
+
+
+def test_schema_lists_all_bundeslaender() -> None:
+    schema = load_config()["schema"]["bundesland"]
+    assert schema.startswith("list(") and schema.endswith(")")
+    for name in BUNDESLAENDER:
+        assert name in schema, f"{name} fehlt in der Bundesland-Auswahl"
 
 
 def test_dockerfile_builds_with_python_base() -> None:

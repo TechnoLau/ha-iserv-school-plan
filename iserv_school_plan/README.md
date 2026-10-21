@@ -4,11 +4,13 @@
 [![Tests](https://github.com/TechnoLau/ha-iserv-school-plan/actions/workflows/ci.yml/badge.svg)](https://github.com/TechnoLau/ha-iserv-school-plan/actions/workflows/ci.yml)
 
 Liest den IServ-Stundenplan ein und stellt die **erste tatsächlich stattfindende
-Unterrichtsstunde** als Home-Assistant-Entities bereit – gedacht als Grundlage für
-einen Schulwecker (z. B. Wecker 45 Minuten vor Stundenbeginn, nur an Schultagen).
+Unterrichtsstunde** sowie einen **„Wecker morgen“** als Home-Assistant-Entities
+bereit – gedacht als Grundlage für einen Schulwecker (z. B. Wecker 45 Minuten vor
+Stundenbeginn, nur an Schultagen).
 
 Die Entities werden per **MQTT Discovery** angelegt; es sind keine manuellen
-YAML-Einträge in Home Assistant nötig.
+YAML-Einträge in Home Assistant nötig. MQTT-Broker, Port, TLS und Zugangsdaten
+kommen automatisch vom Supervisor (Mosquitto-Add-on).
 
 ## Funktionen
 
@@ -16,12 +18,13 @@ YAML-Einträge in Home Assistant nötig.
 - Unterstützte Formate: **HTML-Tabelle**, **JSON** (auch die JSON-Schnittstelle
   der neuen IServ-Stundenplanansicht) und **iCalendar (ICS)**,
   automatische Formaterkennung
-- Regeln für den Schulwecker:
+- **Ferien und Feiertage automatisch** aus openholidaysapi.org für das
+  eingestellte Bundesland (kein API-Key, sieben Tage Cache)
+- Regeln:
   - **Montag–Donnerstag:** vor 12:00 Uhr gilt der heutige Tag, ab 12:00 Uhr der Folgetag
-  - **Freitag/Samstag:** kein Wecker (Wochenendregel), es wird nur der nächste Schultag angezeigt
-  - **Sonntag:** der Montag (bzw. nächste Schultag) wird vorbereitet
-  - Wochenenden, Ferien/Feiertage (konfigurierbar) und Tage ohne stattfindende Stunde
-    werden übersprungen
+  - **Freitag/Samstag/Sonntag:** der nächste Schultag (Montag) wird vorbereitet –
+    ohne Sonderregel, aber auch ohne Wecker am Wochenende
+  - Wochenenden, Ferien/Feiertage und Tage ohne stattfindende Stunde werden übersprungen
   - Bei **fehlenden Daten** wird nie ein Wecker gestellt (`status: error`), damit
     kein falscher Alarm entsteht
 - Entfallene Stunden werden erkannt („fällt aus“, „Entfall“, …) und bei der
@@ -59,83 +62,41 @@ YAML-Einträge in Home Assistant nötig.
   Discovery-Nachrichten verarbeitet werden.
 - Erreichbarkeit des IServ-Servers aus dem Heimnetz (bzw. VPN), falls der Plan
   nicht öffentlich erreichbar ist.
+- **Internet für die Ferien-/Feiertags-API** (openholidaysapi.org). Ohne
+  Internet läuft das Add-on mit den zuletzt gespeicherten Feriendaten weiter.
 
 ## Konfiguration
 
-Für den Normalfall genügt **eine** Angabe: `iserv_url` (plus Benutzername und
-Passwort). `plan_url` bleibt leer – das Add-on sucht die Plantabelle selbst.
+Für den Normalfall genügt **eine** Angabe: `iserv_url` (plus Benutzername,
+Passwort und Bundesland). Alles andere ermittelt das Add-on selbst.
 
 | Option | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
-| `iserv_url` | URL | `https://schule.example.org` | **Die einzige Pflichtangabe:** Basisadresse der Schule, z. B. `https://ebg.kiel.eu` – mit oder ohne `/iserv` am Ende. Auch die komplette Planseite (`…/iserv/timetable`, `…/iserv/plan`) wird akzeptiert; ab 1.0.6 wird der Modulpfad automatisch abgeschnitten |
-| `plan_url` | Text | *(leer)* | Optional. Nur nötig für Sonderfälle (Kalender-Export/JSON-Endpunkt). Leer = automatische Suche (`/iserv/plan`, dann `/iserv/timetable`). Nackte Pfade wie `plan` werden unter `/iserv/` einsortiert |
+| `iserv_url` | URL | `https://schule.example.org` | **Die einzige Pflichtangabe:** Basisadresse der Schule, z. B. `https://ebg.kiel.eu` – mit oder ohne `/iserv` am Ende. Auch die komplette Planseite (`…/iserv/timetable`, `…/iserv/plan`) wird akzeptiert; der Modulpfad wird automatisch abgeschnitten |
 | `username` | Text | *(leer)* | IServ-Benutzername (leer = ohne Login abrufen) |
 | `password` | Passwort | *(leer)* | IServ-Passwort |
-| `plan_format` | Auswahl | `auto` | `auto`, `html`, `json` oder `ics` |
-| `klasse` | Text | *(leer)* | Nur Zeilen dieser Klasse berücksichtigen (z. B. `7a`), falls der Plan mehrere Klassen enthält |
-| `free_days` | Text | *(leer)* | Ferien/Feiertage, siehe Format unten |
+| `bundesland` | Auswahl | `Schleswig-Holstein` | Bundesland für Ferien und Feiertage (alle 16 Länder) |
 | `period_times` | Text | 1–6 | Stundenzeiten, siehe Format unten |
-| `lookahead_days` | Zahl | `21` | Wie viele Tage vorausgeschaut wird |
 | `refresh_minutes` | Zahl | `30` | Abrufintervall in Minuten (5–720) |
-| `mqtt_host` | Text | `core-mosquitto` | Broker-Hostname (Mosquitto-Add-on) |
-| `mqtt_port` | Port | `1883` | Broker-Port |
-| `mqtt_ssl` | Schalter | `aus` | TLS für die Broker-Verbindung (Port dann meist `8883`) |
-| `mqtt_username` | Text | *(leer)* | MQTT-Benutzer (optional) |
-| `mqtt_password` | Passwort | *(leer)* | MQTT-Passwort (optional) |
-| `mqtt_discovery_prefix` | Text | `homeassistant` | Discovery-Prefix der MQTT-Integration |
-| `device_name` | Text | `IServ Stundenplan` | Anzeigename des Geräts in Home Assistant |
-| `verify_ssl` | Schalter | `an` | TLS-Zertifikat prüfen (nur bei Problemen mit Schullizenzen deaktivieren) |
-| `debug_dump` | Schalter | `aus` | Rohantwort unter `/data/debug/plan_raw.*` speichern |
-| `log_level` | Auswahl | `info` | `debug`, `info`, `warning`, `error` |
+| `debug_dump` | Schalter | `aus` | Rohantwort unter `/data/debug/plan_raw.*` speichern und Debug-Logging aktivieren |
 
-Solange `mqtt_host` auf `core-mosquitto` (Standard) steht, holt sich das Add-on
-die Broker-Zugangsdaten beim Supervisor (`mqtt:want`) – MQTT-Benutzer und
--passwort müssen dann nicht eingetragen werden. Für einen externen Broker
-`mqtt_host`, `mqtt_port` (und ggf. `mqtt_ssl`) sowie Zugangsdaten selbst setzen.
+Die Plantabelle, das Format, die SSL-Prüfung, das Log-Level und das Gerät
+(`IServ Stundenplan`) werden automatisch bestimmt. **Alte Optionen** aus 1.0.x
+(`plan_url`, `plan_format`, `klasse`, `free_days`, `lookahead_days`, `mqtt_*`,
+`verify_ssl`, `log_level`, `device_name`) werden ignoriert – siehe
+[CHANGELOG.md](CHANGELOG.md) für die Migration.
 
-### MQTT-Benutzer (Mosquitto-Add-on, Version 7)
+### MQTT
 
-- Add-ons erreichen den Broker über das interne Docker-Netz
-  (`core-mosquitto:1883`). Die Ports in der **Network**-Karte des
-  Mosquitto-Add-ons (1883/1884/8883/8884) gelten nur für Geräte **außerhalb**
-  von Home Assistant – sie haben keinen Einfluss auf die Verbindung dieses
-  Add-ons.
-- Der Supervisor liefert die Zugangsdaten über `mqtt:provide`. Mosquitto 7
-  erzeugt dafür den Dienst-Benutzer `addons`; `homeassistant` und `addons` sind
-  reservierte Namen.
-- Seit Mosquitto 7 hängt der Broker an der Home-Assistant-Benutzerverwaltung:
-  MQTT-Clients können **Home-Assistant-Benutzer** verwenden (Einstellungen →
-  Personen → Benutzer) oder eigene `logins` in der Mosquitto-Konfiguration.
-- `mqtt_discovery_prefix` (`homeassistant`) betrifft nur die Topics und hat
-  nichts mit der Anmeldung zu tun.
+Das Add-on nutzt `mqtt:want`: Der Supervisor liefert Host, Port, TLS und
+Zugangsdaten des Mosquitto-Add-ons. Ein externer Broker oder eigene
+MQTT-Zugangsdaten lassen sich nicht mehr eintragen; läuft der Broker als
+eigenes Add-on, ist nichts weiter zu tun.
 
 Meldet das Log `MQTT-Verbindung abgelehnt: Not authorized`, sind die
-Zugangsdaten veraltet oder ungültig. Ab Version 1.0.3 fragt das Add-on sie nach
-einem Fehlschlag erneut beim Supervisor ab (und nennt den verwendeten Benutzer).
-Hilft das nicht: Mosquitto-Add-on neu starten (schreibt Benutzer/Passwort neu)
-und – falls weiterhin nötig – einen eigenen Benutzer vergeben:
-
-1. Mosquitto-Add-on → Konfiguration → `logins` ergänzen:
-   ```yaml
-   logins:
-     - username: iserv
-       password: geheim
-   ```
-2. Diese Werte in den Optionen des IServ-Add-ons als `mqtt_username` und
-   `mqtt_password` eintragen.
-
-
-### Ferien und Feiertage (`free_days`)
-
-Ein Eintrag pro Zeitraum, getrennt durch `;`:
-
-```text
-2026-07-06..2026-08-14:Sommerferien;2026-10-03:Tag der Deutschen Einheit;2026-10-12..2026-10-24:Herbstferien
-```
-
-- `START..ENDE:Name` für Zeiträume, `DATUM:Name` für einzelne Tage
-- Datum als `YYYY-MM-DD` oder `DD.MM.YYYY`
-- Fehlt der Name, wird „schulfrei“ angezeigt
+Supervisor-Zugangsdaten veraltet. Ab 1.1.0 fragt das Add-on sie nach einem
+Fehlschlag erneut ab; hilft das nicht, das Mosquitto-Add-on neu starten (es
+schreibt Benutzer und Passwort neu).
 
 ### Stundenzeiten (`period_times`)
 
@@ -150,33 +111,50 @@ Ein Eintrag pro Zeitraum, getrennt durch `;`:
 - Wichtig: Ohne Startzeit kann kein Wecker berechnet werden – der Status ist dann
   `error` und der Wecker bleibt aus.
 
+## Ferien und Feiertage
+
+Das Add-on lädt Schulferien und gesetzliche Feiertage automatisch für das
+eingestellte `bundesland` von **openholidaysapi.org** (kostenlos, ohne API-Key):
+
+- Abruf beim Start und danach alle sieben Tage, gespeichert in
+  `/data/holidays.json`
+- Bei einem Bundesland-Wechsel wird sofort neu geladen
+- Ist die API nicht erreichbar, gelten die gespeicherten Daten weiter; im
+  Status-Attribut `warnings` steht dann ein Hinweis
+- **IServ-Daten haben Vorrang:** Liefert IServ für einen Tag Stunden, ist das
+  ein Schultag – auch wenn der Kalender Ferien meldet (z. B. regionale
+  Ausnahmen wie Insel-Ferien)
+
+Damit entfällt die frühere Option `free_days`.
+
+
 ## Entities
 
-Alle Entities hängen am Gerät `device_name` (Standard: „IServ Stundenplan“).
+Alle Entities hängen am Gerät „IServ Stundenplan“.
 
 | Entity | Typ | Bedeutung |
 | --- | --- | --- |
-| `sensor.stundenbeginn` | Timestamp | Beginn der ersten stattfindenden Stunde (ISO 8601 mit Zeitzone) |
-| `sensor.erste_unterrichtsstunde` | Sensor | Stundennummer der ersten stattfindenden Stunde |
-| `sensor.naechster_schultag` | Datum | Datum, auf das sich die Werte beziehen |
-| `binary_sensor.schulwecker_aktiv` | Binary Sensor | `on`, wenn ein Schulwecker gestellt werden darf |
-| `sensor.stundenplan_status` | Sensor | `ok`, `ferien`, `kein_unterricht`, `wochenende` oder `error` |
+| `sensor.stundenplan_status` | Sensor | `verbinden` (Start/keine Daten), `verbunden` oder `verbindung fehlgeschlagen` |
+| `sensor.erste_unterrichtsstunde` | Sensor | Stundennummer der ersten stattfindenden Stunde; `unknown`, wenn keine berechnet werden kann |
+| `sensor.naechster_schultag` | Datum | Datum des nächsten Schultags mit stattfindender Stunde |
+| `binary_sensor.wecker_morgen` | Binary Sensor | `on` nur, wenn **morgen** ein Schultag mit stattfindender Stunde ist (Sa/So immer `off`) |
 
 Die Entity-IDs sind Vorschläge von MQTT Discovery: Sie gelten beim ersten
 Anlegen der Entity und bleiben danach erhalten, auch wenn du sie in Home
 Assistant umbenennst. Das Add-on sendet dafür `default_entity_id` (ab Home
-Assistant 2026.4) und zusätzlich `object_id` (ältere Versionen); unbekannte
-Schlüssel ignoriert Home Assistant.
+Assistant 2026.4) und zusätzlich `object_id` (ältere Versionen).
 
 Zusatzinformationen als Attribute:
 
-- **Stundenbeginn:** `period`, `subject`, `room`, `reason`
-- **Erste Unterrichtsstunde:** `subject`, `room`, `planned_first_period`,
-  `cancelled_periods`
-- **Nächster Schultag:** `reason`, `status`
-- **Schulwecker aktiv:** `reason`, `start`, `target_date`
-- **Status:** `reason`, `fetched_at`, `age_minutes`, `skipped`, `warnings`,
-  `last_error`
+- **Erste Unterrichtsstunde:** `start` (`07:45`), `start_iso` (ISO 8601 mit
+  Zeitzone), `hours_until` (ganze Stunden ab jetzt), `target_date`, `subject`,
+  `room`, `planned_first_period`, `cancelled_periods`
+- **Nächster Schultag:** `reason`, `status`, `cancelled_periods`
+- **Wecker morgen:** `date`, `start`, `period`, `subject`, `room`, `reason`
+  (z. B. `Wochenende`, `Herbstferien`, `keine Daten`) und `plan_status`
+- **Status:** `reason`, `plan_status` (`ok`, `ferien`, `kein_unterricht`,
+  `error`), `bundesland`, `holidays_updated`, `fetched_at`, `age_minutes`,
+  `mqtt_connected`, `iserv_url`, `last_error`, `skipped`, `warnings`
 
 `skipped` listet die übersprungenen Tage mit Grund auf (Wochenende, Ferien,
 kein Unterricht, keine Daten) – hilfreich, wenn der nächste Schultag
@@ -186,17 +164,41 @@ unerwartet weit in der Zukunft liegt.
 
 | Topic | Inhalt |
 | --- | --- |
-| `homeassistant/sensor/iserv_stundenbeginn/config` | Discovery (analog für die übrigen Entities) |
+| `homeassistant/sensor/iserv_status/config` | Discovery (analog für die übrigen Entities) |
 | `iserv_school_plan/state` | Zustand als JSON (retained) |
 | `iserv_school_plan/availability` | `online` / `offline` (retained, Last Will) |
 
+Beim Verbinden löscht das Add-on die Discovery-Topics der Entities aus 1.0.x
+(`iserv_stundenbeginn`, `iserv_schulwecker`) mit einem leeren retained Payload.
 Der Zustand wird nur bei Änderungen gesendet, bleibt aber retained – nach einem
-Neustart von Home Assistant sind die Werte sofort wieder da. Die Altersangabe
-`data_age_minutes` wird minütlich aktualisiert.
+Neustart von Home Assistant sind die Werte sofort wieder da.
 
 ## Beispiel: Schulwecker-Automation
 
-45 Minuten vor Stundenbeginn benachrichtigen, aber nur wenn der Wecker aktiv ist:
+Der Wecker wird gestellt, sobald `binary_sensor.wecker_morgen` auf `on` geht
+(also am Nachmittag/Abend vor einem Schultag):
+
+```yaml
+automation:
+  - alias: "Schulwecker stellen"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.wecker_morgen
+        to: "on"
+    actions:
+      - action: notify.mobile_app_mein_handy
+        data:
+          title: "Schule"
+          message: >-
+            Morgen ({{ state_attr('binary_sensor.wecker_morgen', 'date') }})
+            {{ state_attr('binary_sensor.wecker_morgen', 'start') }} Uhr,
+            {{ state_attr('binary_sensor.wecker_morgen', 'period') }}. Stunde
+            {{ state_attr('binary_sensor.wecker_morgen', 'subject') or '' }}
+            in Raum {{ state_attr('binary_sensor.wecker_morgen', 'room') or '?' }}.
+```
+
+Klingeln 45 Minuten vor der ersten Stunde (nur wenn der Wecker aktiv ist):
 
 ```yaml
 automation:
@@ -205,53 +207,52 @@ automation:
     triggers:
       - trigger: template
         value_template: >-
-          {% set start = states('sensor.stundenbeginn') %}
-          {% if start in ['unknown', 'unavailable', 'none', ''] %}
+          {% set start = state_attr('sensor.erste_unterrichtsstunde', 'start_iso') %}
+          {% if not start %}
             false
           {% else %}
             {{ now() >= as_datetime(start) - timedelta(minutes=45) }}
           {% endif %}
     conditions:
-      - condition: state
-        entity_id: binary_sensor.schulwecker_aktiv
-        state: "on"
+      # Nur am tatsaechlichen Unterrichtstag klingeln.
+      - condition: template
+        value_template: >-
+          {{ state_attr('sensor.erste_unterrichtsstunde', 'target_date') == now().strftime('%Y-%m-%d') }}
     actions:
       - action: notify.mobile_app_mein_handy
         data:
           title: "Schule"
           message: >-
-            Erste Stunde: {{ state_attr('sensor.stundenbeginn', 'subject') }}
-            um {{ as_timestamp(states('sensor.stundenbeginn')) | timestamp_custom('%H:%M', true) }}
-            in Raum {{ state_attr('sensor.stundenbeginn', 'room') or '?' }}.
+            Erste Stunde: {{ state_attr('sensor.erste_unterrichtsstunde', 'subject') }}
+            um {{ state_attr('sensor.erste_unterrichtsstunde', 'start') }} Uhr
+            in Raum {{ state_attr('sensor.erste_unterrichtsstunde', 'room') or '?' }}.
 ```
 
-Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist.
+`hours_until` eignet sich für Anzeigen („in 9 Stunden“).
+
 
 ## Verhalten im Detail
 
 - **Zeitzone:** fest `Europe/Berlin` (Sommer-/Winterzeit wird korrekt behandelt),
   unabhängig von der Zeitzone des Containers.
-- **12-Uhr-Regel:** Der Wecker wird morgens für den aktuellen Tag gestellt; ab
-  12:00 Uhr für den nächsten Schultag. So kann am Nachmittag schon der nächste
-  Morgen geprüft werden, ohne einen bereits vergangenen Termin zu melden.
-- **Freitag/Samstag:** Es wird kein Wecker gestellt (`alarm: false`), auch wenn
-  Daten für Montag vorliegen. `sensor.naechster_schultag` zeigt trotzdem den
-  nächsten bekannten Schultag.
-- **Sonntag:** Es wird der Montag (bzw. der nächste Schultag) vorbereitet – der
-  Wecker ist aktiv, sofern Unterrichtsdaten vorliegen.
-- **Keine Daten:** Liegt für einen Tag kein Eintrag vor (z. B. weil IServ den Plan
-  noch nicht veröffentlicht hat), wird nicht geraten: Status `error`,
-  `alarm: false`, `reason` nennt den Grund.
-- **Planabdeckung:** Feiertage außerhalb der Datenabdeckung erkennt das Add-on
-  nur über `free_days`.
+- **12-Uhr-Regel:** Montag–Donnerstag gilt vor 12:00 Uhr der heutige Tag, ab
+  12:00 Uhr der Folgetag. Freitag ist bis 12:00 Uhr ein normaler Schultag.
+- **Wochenende:** Samstag/Sonntag wird der Montag (bzw. der nächste Schultag)
+  vorbereitet. `binary_sensor.wecker_morgen` ist samstags und sonntags immer
+  `off`.
+- **Keine Daten:** Liegt für einen Tag kein Eintrag vor (z. B. weil IServ den
+  Plan noch nicht veröffentlicht hat), wird nicht geraten: Status `error`,
+  `reason` nennt den Grund.
+- **Ferien/Feiertage:** kommen aus dem automatisch geladenen Kalender. Liefert
+  IServ für einen Ferientag Daten, gelten die IServ-Daten.
 - **Abrufe:** Start des Add-ons, danach alle `refresh_minutes`. Nach einem Fehler
   wird frühestens nach 5 Minuten erneut versucht; bei weiteren Fehlversuchen
   verdoppelt sich die Wartezeit (10, 20, 40, höchstens 60 Minuten). Lehnt IServ
   den Filter der JSON-Schnittstelle ab (HTTP 400, „Die erforderliche Eigenschaft
   classes fehlt.“), gilt sofort das normale Intervall – schnelles Wiederholen
-  ändert daran nichts. Nachts (22–5 Uhr) wird nur
-  geladen, wenn die Daten älter als 6 Stunden sind. Der Zustand wird alle
-  30 Sekunden neu berechnet (12-Uhr-Regel, Tageswechsel).
+  ändert daran nichts. Nachts (22–5 Uhr) wird nur geladen, wenn die Daten älter
+  als 6 Stunden sind. Der Zustand wird alle 30 Sekunden neu berechnet
+  (12-Uhr-Regel, Tageswechsel).
 - **Cache:** Zuletzt erfolgreich geladene Daten liegen in `/data/cache.json` und
   werden nach einem Neustart sofort verwendet, bis der erste Abruf gelingt.
 
@@ -259,26 +260,21 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 
 | Symptom | Ursache / Lösung |
 | --- | --- |
-| Status `error`, `last_error: iserv_url muss …` | `iserv_url` auf die eigene Schuladresse setzen – mehr ist nicht nötig (`plan_url` darf leer bleiben) |
-| `Login fehlgeschlagen …` | Benutzername/Passwort prüfen; Schul-URL prüfen (`/iserv/auth/login`). Ab 1.0.4 steht der IServ-Hinweis dabei (z. B. „Bitte warten Sie … Sekunden“ = Brute-Force-Schutz nach mehreren Starts) |
-| `IServ ist im Wartungsmodus …` | IServ ist selbst offline (HTTP 503 mit `X-IServ-Maintenance`, Seite „Wartungsarbeiten“). Ab 1.0.5 erkennt das Add-on das und versucht es beim nächsten Intervall erneut – nichts umkonfigurieren |
-| `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
-| `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Genau dieser Fehler steckte ab 1.0.9 noch einmal im JSON-Abruf (`timetable/data`) und ist mit **1.0.10** behoben (dort jetzt `Accept: */*`). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
-| `Plan-Abruf fehlgeschlagen (HTTP 404)` | Einer der Plan-Pfade existiert auf dieser IServ-Instanz nicht (typisch: Tabelle liegt unter `/iserv/timetable`, `/iserv/plan` ist abgeschaltet – oder umgekehrt). Ab 1.0.7 probiert das Add-on alle bekannten Pfade durch und nennt in `last_error` jede versuchte URL mit Status (`[Versuche: …/iserv/plan: HTTP 404; …/iserv/timetable: HTTP 200]`). Stehen dort ausschließlich 404er, ist das Modul für dieses Konto nicht freigeschaltet oder `iserv_url` zeigt auf den falschen Host |
-| `Plan-Abruf fehlgeschlagen (HTTP 400): Die erforderliche Eigenschaft classes fehlt.` | Der Filter der JSON-Schnittstelle war unvollständig: IServ verlangt `classes`, `teachers` und `rooms`, sonst keine Antwort. Ab **1.0.12** werden alle drei immer mitgeschickt (`[]` und, falls das leer bleibt, `["%"]`). Bleibt es bei HTTP 400, nennt `last_error` den vollständigen IServ-Text; dann bitte mit `debug_dump: true` und `log_level: debug` melden |
-| `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Ab 1.0.8 nennt die Meldung die **Tabellenstruktur** (`Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf: 'Stunde \| Montag 19.10. \| …', Wochengitter mit Datum`), nutzt einen auf der Seite verlinkten iCal-Export und ab 1.0.9 die JSON-Schnittstelle der Stundenplanansicht; deren Struktur steht bei Fehlschlag als `[JSON: …]` in der Meldung. „`keine <table>`“ / nur Skript-URLs = JavaScript-Ansicht. Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
-| `Wochengitter ohne Datum und ohne Wochenanker ignoriert (…)` | Die Seite zeigt die Stundenplan-Woche, aber die Spaltenköpfe enthalten nur Wochentage („Montag“) ohne Datum – und auf der Seite steht kein Anker (Filter-JSON, Zeitraum `19.10. - 25.10.2026`, `KW 43`). Ohne Datum ordnet das Add-on keine Stunden zu, statt sie zu raten; die Klammer nennt Zeilenzahl und Kopfzeile. Ab **1.0.12** werden undatierte Gitter ausgewertet, sobald ein solcher Anker gefunden wird; `table_summary` zeigt dann `Wochenanker 19.10.2026` statt `kein Wochenanker`. Bleibt es bei `kein Wochenanker`: die persönliche iCal-Export-Adresse aus IServ (Stundenplan → Export) als `plan_url` eintragen und `plan_format: ics` setzen, oder `debug_dump: true` und die HTML-Seite mitschicken |
-| `Tabelle ohne erkannte Spaltenueberschrift ignoriert` (2×) | Die Seite enthält Tabellen, aber keine Vertretungsplan-Kopfzeile (`Stunde`/`Zeit`/`Fach`). Seit 1.0.8 wird stattdessen die Wochenansicht (Wochentage als Spalten) ausgewertet; bleibt es bei der Meldung, sagt der Zusatz `Wochengitter …` in derselben Zeile, was gefunden wurde |
-| `Tabellen: 1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'` (Tabellen mit **nur** einer Kopfzeile) | Dann stehen im HTML **keine Unterrichtszeilen** – die neue IServ-Oberfläche lädt sie per JavaScript (`portal.js`) nach, ein HTML-Parser kann sie nicht sehen. Ab **1.0.9** holt das Add-on sie selbst über die JSON-Schnittstelle der Ansicht (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, gleiche Anmeldung, `X-Requested-With: XMLHttpRequest`, **`Accept: */*`** – mit `application/json` antwortet IServ nur „HTTP 401“), seit 1.0.10 mit sichtbarem Grund je Versuch im Feld `[JSON: …]` und seit **1.0.11** Woche für Woche (ein größerer Zeitraum quittiert das Modul mit `HTTP 400 {"status":"error",…"Fehler beim Verarbeiten der Anfrage"}`). Alternativ: die persönliche **iCal-/ICS-Export-Adresse** aus IServ als `plan_url` eintragen und `plan_format: ics` setzen (Stundenplan → „Exportieren“/„iCal“ → Link-Adresse kopieren). Seit **1.0.12** enthält der Filter zusätzlich `classes`, `teachers` und `rooms`; ohne sie antwortet das Modul mit `HTTP 400 „Die erforderliche Eigenschaft classes fehlt.“` (genau der Fehler aus 1.0.11) |
-| `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ (neue Web-Oberfläche) leitete nach dem Login per Meta-Refresh/JavaScript weiter; ab 1.0.6 führt das Add-on diese Weiterleitung selbst aus. Bleibt die Meldung, `log_level: debug` setzen – dort steht das gefundene Weiterleitungsziel. Hilft das nicht, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
-| `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
-| Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
-| Zeiten wirken verschoben | Prüfen, ob IServ lokale Zeiten liefert; `period_times` ist nur ein Fallback |
-| `SSL: CERTIFICATE_VERIFY_FAILED` | Schul-Zertifikat ist im Container nicht vertrauenswürdig; `verify_ssl: false` (nur wenn vertretbar) |
-| Wecker bleibt aus, obwohl Unterricht ist | `sensor.stundenplan_status` und `last_error` prüfen; ggf. Startzeiten über `period_times` ergänzen |
+| `sensor.stundenplan_status` = `verbindung fehlgeschlagen`, `last_error: iserv_url muss …` | `iserv_url` auf die eigene Schuladresse setzen – mehr ist nicht nötig |
+| `Login fehlgeschlagen …` | Benutzername/Passwort prüfen; Schul-URL prüfen (`/iserv/auth/login`). Der IServ-Hinweis steht dabei (z. B. „Bitte warten Sie … Sekunden“ = Brute-Force-Schutz nach mehreren Starts) |
+| `IServ ist im Wartungsmodus …` | IServ ist selbst offline – später erneut versuchen |
+| `Plan enthielt keine verwertbaren Daten` | IServ liefert HTML/JSON, das kein Parser kennt: `debug_dump: true` setzen, neu starten, `/data/debug/plan_raw.*` ansehen (per SSH/Samba) und ggf. einen Parser in `app/parsers.py` ergänzen |
+| `Wochengitter ohne Datum und ohne Wochenanker ignoriert` | Die Seite zeigt nur Wochentage und keinen Anker (Filter-JSON, `19.10. - 25.10.2026`, `KW 43`). Ohne Datum werden keine Stunden geraten; `table_summary` im Log nennt die gefundene Struktur |
+| HTML enthält nur eine Kopfzeile, keine Unterrichtszeilen | Die neue IServ-Oberfläche lädt die Zeilen per JavaScript nach. Das Add-on fragt deshalb zusätzlich die JSON-Schnittstelle ab (`/iserv/timetable/data?filter=…` mit `startDate`, `endDate`, `classes`, `teachers`, `rooms`) und wertet einen verlinkten iCal-Export aus |
+| `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ leitete per Meta-Refresh/JavaScript weiter; das Add-on führt diese Weiterleitung selbst aus. Bleibt die Meldung, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
+| `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten veraltet: Mosquitto-Add-on neu starten (schreibt Benutzer/Passwort neu); das Add-on fragt sie zusätzlich selbst erneut ab |
+| Entities erscheinen nicht | MQTT-Integration und Broker prüfen, Add-on-Log ansehen. Nach dem Update auf 1.1.0 sind `sensor.stundenbeginn` und `binary_sensor.schulwecker_aktiv` bewusst entfernt – Automatisierungen auf `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen` umstellen |
+| Ferien fehlen oder sind falsch | `bundesland` prüfen; `warnings`/`holidays_updated` im Status-Attribut kontrollieren. Ohne Internet gelten die gespeicherten Daten (max. sieben Tage alt) |
+| Wecker bleibt aus, obwohl Unterricht ist | `sensor.erste_unterrichtsstunde` (Attribute `start`, `target_date`) und `sensor.stundenplan_status` prüfen; ggf. Startzeiten über `period_times` ergänzen |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | Das Schul-Zertifikat ist im Container nicht vertrauenswürdig. Die Prüfung ist immer aktiv; die Schule muss ein gültiges Zertifikat (z. B. Let's Encrypt) ausliefern |
 
 Log des Add-ons: **Einstellungen → Add-ons → IServ Stundenplan → Log**. Für mehr
-Details `log_level: debug` setzen.
+Details `debug_dump: true` setzen (aktiviert zusätzlich Debug-Logging).
 
 ## Sicherheit
 
@@ -288,7 +284,8 @@ Details `log_level: debug` setzen.
 - Zugangsdaten niemals in Git einchecken.
 - `debug_dump` kann personenbezogene Daten (Klassen, Räume, Lehrkräfte) enthalten
   – nur temporär aktivieren.
-- `verify_ssl: false` schwächt die Transportsicherheit und sollte Ausnahme bleiben.
+- TLS-Zertifikate werden immer geprüft (kein Abschalt-Schalter mehr).
+
 
 ## Entwicklung
 
@@ -296,7 +293,8 @@ Details `log_level: debug` setzen.
 iserv_school_plan/
 ├── app/
 │   ├── main.py      # Schleife, Cache, Statusaufbau
-│   ├── config.py    # Add-on-Optionen
+│   ├── config.py    # Add-on-Optionen (Whitelist)
+│   ├── holidays.py  # Ferien/Feiertage (openholidaysapi.org + Cache)
 │   ├── iserv.py     # Login + HTTP-Abruf
 │   ├── parsers.py   # HTML/JSON/ICS-Parser
 │   ├── plan.py      # Datenmodell + Auswahlregeln
@@ -311,7 +309,7 @@ Eine Ebene darüber liegt `repository.yaml` (Metadaten des Add-on-Repositories).
 Für die lokale Installation (Variante A) wird nur der Ordner
 `iserv_school_plan/` benötigt.
 
-Tests lokal ausführen (Python ≥ 3.11, `pytest` und `paho-mqtt` installiert):
+Tests lokal ausführen (Python ≥ 3.11, `pytest`, `pyyaml` und `paho-mqtt` installiert):
 
 ```powershell
 cd iserv_school_plan
@@ -319,29 +317,22 @@ python -m pytest -q
 ```
 
 Der Login-Ablauf wird in `tests/test_iserv.py` gegen einen lokalen HTTP-Server
-getestet; die Parser-Tests arbeiten mit anonymisierten Ausschnitten.
+getestet; die Parser-Tests arbeiten mit anonymisierten Ausschnitten, die
+Ferien-Tests mit Beispielantworten der API (ohne Netzwerk).
 
 ### Anpassung an die eigene IServ-Installation
 
-Da IServ je nach Version und Schulkonfiguration unterschiedliche Export-Formate
-anbietet, ist `plan_url` frei konfigurierbar (bleibt sie leer, probiert das
-Add-on `/iserv/plan` und `/iserv/timetable`). Die Parser sind tolerant gegenüber
-Spaltennamen („Fach“, „Raum“, „Zeit“, „Art“, „Klasse“, …) und Uhrzeitformaten
-(`07:45 - 08:30`, `7:45`, `745`). Ab Version 1.0.8 wird auch die
-Stundenplan-Wochenansicht gelesen (Spalten = Wochentage mit Datum, Zeilen =
-Stunden, verbundene Zellen für Doppelstunden; ab 1.0.12 auch dann, wenn die
-Spalten nur Wochentage nennen und die Seite einen Wochenanker enthält – etwa
-das Filter-JSON, `19.10. - 25.10.2026` oder `KW 43`) sowie – wenn die
-HTML-Auswertung leer bleibt – ein auf der Seite verlinkter iCal-Export. Ab
-Version 1.0.9 fragt das Add-on zusätzlich die JSON-Schnittstelle der
-Stundenplanansicht ab (`/iserv/timetable/data?filter=` mit `startDate`,
-`endDate`, `classes`, `teachers`, `rooms` – seit 1.0.11 Woche für Woche, weil
-größere Zeiträume mit HTTP 400 abgewiesen werden, seit 1.0.12 mit den
-Pflichtfeldern, ohne die das Modul „Die erforderliche Eigenschaft classes
-fehlt.“ meldet), weil die neue Oberfläche die Zeilen per JavaScript nachlädt;
-Feldnamen dürfen dabei deutsch oder englisch sein und Stunden ohne Datum
-(`dow`/`weekday`) bekommen es aus `meta.filter.startDate`. Bei einem unbekannten
-Format:
+Das Add-on sucht die Plantabelle selbst (`/iserv/plan`, `/iserv/timetable`,
+`/iserv/time-table`) und erkennt HTML, JSON und ICS automatisch. Die Parser sind
+tolerant gegenüber Spaltennamen („Fach“, „Raum“, „Zeit“, „Art“, „Klasse“, …) und
+Uhrzeitformaten (`07:45 - 08:30`, `7:45`, `745`). Gelesen werden auch die
+Wochenansicht (Spalten = Wochentage mit Datum, verbundene Zellen für
+Doppelstunden; Wochenanker aus Filter-JSON, `19.10. - 25.10.2026` oder `KW 43`)
+und – wenn die HTML-Auswertung leer bleibt – ein auf der Seite verlinkter
+iCal-Export sowie die JSON-Schnittstelle der Stundenplanansicht
+(`/iserv/timetable/data?filter=` mit `startDate`, `endDate`, `classes`,
+`teachers`, `rooms`; Woche für Woche, weil größere Zeiträume mit HTTP 400
+abgewiesen werden). Bei einem unbekannten Format:
 
 1. `debug_dump: true` setzen und das Add-on neu starten.
 2. `/data/debug/plan_raw.*` und `plan_raw.meta.json` prüfen; die Fehlermeldung
@@ -350,5 +341,3 @@ Format:
 3. Bei Bedarf in `app/parsers.py` einen weiteren Parser ergänzen, in
    `detect_format`/`parse_payload` registrieren und in `tests/test_parsers.py`
    testen.
-
-
