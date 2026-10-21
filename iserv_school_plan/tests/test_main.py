@@ -77,8 +77,8 @@ def test_build_state_morning_uses_today() -> None:
     assert state["connection"] == "verbunden"
     assert state["status"] == "ok"
     assert state["target_date"] == "2026-10-19"
-    assert state["start"] == "2026-10-19T07:45:00+02:00"
-    assert state["start_iso"] == state["start"]
+    assert state["start"] == "07:45"
+    assert state["start_iso"] == "2026-10-19T07:45:00+02:00"
     assert state["period"] == 1
     assert state["hours_until"] == 0
     assert state["subject"] == "Mathematik"
@@ -159,9 +159,37 @@ def test_build_state_after_noon_uses_next_day() -> None:
     state = addon.build_state(now)
 
     assert state["target_date"] == "2026-10-20"
-    assert state["start"] == "2026-10-20T09:50:00+02:00"
+    assert state["start"] == "09:50"
+    assert state["start_iso"] == "2026-10-20T09:50:00+02:00"
     assert state["period"] == 3
     assert state["subject"] == "Physik"
+
+
+def test_start_uses_24h_format_even_in_the_evening() -> None:
+    """Der Zustand ist die Uhrzeit im 24-Stunden-Format (kein 12h-Format)."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    monday = date(2026, 10, 19)
+    dataset = PlanDataset(fetched_at=now, source="/plan")
+    dataset.days[monday] = DayPlan(
+        date=monday,
+        lessons=[
+            Lesson(
+                period=1,
+                start=time(19, 20),
+                end=time(20, 5),
+                subject="Musik",
+                date=monday,
+            )
+        ],
+    )
+    addon.dataset = dataset
+
+    state = addon.build_state(now)
+
+    assert state["start"] == "19:20"
+    assert state["start_iso"] == "2026-10-19T19:20:00+02:00"
+    assert re.fullmatch(r"\d{2}:\d{2}", state["start"])
 
 
 def test_hours_until_counts_from_now() -> None:
@@ -204,7 +232,7 @@ def test_discovery_templates_use_existing_state_keys() -> None:
     addon.dataset = make_dataset(now)
     state = addon.build_state(now)
 
-    for topic, payload in discovery_messages("homeassistant", "IServ Test", "1.1.0"):
+    for topic, payload in discovery_messages("homeassistant", "IServ Test", "1.1.1"):
         template = payload.get("json_attributes_template", "") + payload.get(
             "value_template", ""
         )
@@ -467,7 +495,7 @@ def test_failed_refresh_keeps_last_dataset() -> None:
     assert addon.dataset is dataset
     state = addon.build_state(now)
     assert state["status"] == "ok"
-    assert state["start"] == "2026-10-20T09:50:00+02:00"
+    assert state["start"] == "09:50"
     assert "404" in (state["last_error"] or "")
 
 

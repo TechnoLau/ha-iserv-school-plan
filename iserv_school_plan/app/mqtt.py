@@ -43,7 +43,11 @@ ATTRIBUTES = {
     "'subject': value_json.subject, 'room': value_json.room, "
     "'planned_first_period': value_json.planned_first_period, "
     "'cancelled_periods': value_json.cancelled_periods} | tojson }}",
-    "date": "{{ {'reason': value_json.reason, 'status': value_json.status, "
+    "date": "{{ {'date': value_json.target_date, 'start': value_json.start, "
+    "'start_iso': value_json.start_iso, 'hours_until': value_json.hours_until, "
+    "'period': value_json.period, 'subject': value_json.subject, "
+    "'room': value_json.room, 'planned_first_period': value_json.planned_first_period, "
+    "'reason': value_json.reason, 'status': value_json.status, "
     "'cancelled_periods': value_json.cancelled_periods} | tojson }}",
     "morgen": "{{ {'date': value_json.wecker_morgen_date, "
     "'start': value_json.wecker_morgen_start, 'period': value_json.wecker_morgen_period, "
@@ -116,9 +120,11 @@ def discovery_messages(prefix: str, device_name: str, version: str) -> list[tupl
             "iserv_naechster_schultag",
             {
                 "name": "Naechster Schultag",
-                "device_class": "date",
-                "icon": "mdi:calendar-arrow-right",
-                "value_template": "{{ value_json.target_date if value_json.target_date "
+                "icon": "mdi:calendar-clock",
+                # Kein device_class "date": der Zustand ist die Uhrzeit der
+                # ersten Stunde (24-Stunden-Format, z. B. 07:45); das Datum
+                # steht im Attribut "date".
+                "value_template": "{{ value_json.start if value_json.start "
                 "else 'unknown' }}",
                 "json_attributes_topic": STATE_TOPIC,
                 "json_attributes_template": ATTRIBUTES["date"],

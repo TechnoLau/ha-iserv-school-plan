@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+- `sensor.naechster_schultag` liefert jetzt die **Uhrzeit der ersten Stunde im
+  24-Stunden-Format** als Zustand (z. B. `07:45` statt `2026-10-22`). Das Datum
+  steht im Attribut `date`; zusaetzlich gibt es `start_iso`, `hours_until`,
+  `period`, `subject`, `room` und `planned_first_period`. `device_class` `date`
+  ist entfallen, weil Home Assistant dort nur ein Datum akzeptiert.
+- Das Attribut `start` ist bei allen Sensoren die Uhrzeit (`07:45`),
+  `start_iso` bleibt ISO 8601 mit Zeitzone - so wie in README/DOCS beschrieben.
+
 ## 1.1.0
 
 **Neue Entities und weniger Optionen – bitte Automatisierungen anpassen.**

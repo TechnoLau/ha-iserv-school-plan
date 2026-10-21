@@ -18,7 +18,7 @@ from app.mqtt import (
 
 
 def test_discovery_topics_and_payloads() -> None:
-    messages = discovery_messages("homeassistant", "IServ Test", "1.1.0")
+    messages = discovery_messages("homeassistant", "IServ Test", "1.1.1")
     topics = {topic: payload for topic, payload in messages}
 
     assert set(topics) == {
@@ -32,12 +32,19 @@ def test_discovery_topics_and_payloads() -> None:
     assert status["state_topic"] == STATE_TOPIC
     assert status["availability_topic"] == AVAILABILITY_TOPIC
     assert status["device"]["name"] == "IServ Test"
-    assert status["device"]["sw_version"] == "1.1.0"
+    assert status["device"]["sw_version"] == "1.1.1"
     assert "value_json.connection" in status["value_template"]
 
     first = topics["homeassistant/sensor/iserv_erste_stunde/config"]
     assert "value_json.period" in first["value_template"]
     assert "hours_until" in first["json_attributes_template"]
+
+    day = topics["homeassistant/sensor/iserv_naechster_schultag/config"]
+    # Der Zustand ist die Uhrzeit (24h, z. B. 07:45); ein Datum waere mit
+    # device_class "date" erwartet worden und ist deshalb entfernt.
+    assert "device_class" not in day
+    assert "value_json.start" in day["value_template"]
+    assert "value_json.target_date" in day["json_attributes_template"]
 
     morning = topics["homeassistant/binary_sensor/iserv_wecker_morgen/config"]
     assert morning["payload_on"] == "ON"
@@ -50,7 +57,7 @@ def test_discovery_topics_and_payloads() -> None:
 
 
 def test_discovery_entity_ids_match_documented_entity_ids() -> None:
-    topics = dict(discovery_messages("homeassistant", "IServ Test", "1.1.0"))
+    topics = dict(discovery_messages("homeassistant", "IServ Test", "1.1.1"))
     expected = {
         "homeassistant/sensor/iserv_status/config": "sensor.stundenplan_status",
         "homeassistant/sensor/iserv_erste_stunde/config": "sensor.erste_unterrichtsstunde",
@@ -75,7 +82,7 @@ def test_removed_entities_are_deleted_with_empty_payload() -> None:
         "homeassistant/binary_sensor/iserv_schulwecker/config",
     ]
 
-    publisher = MqttPublisher(AddonOptions(), "1.1.0")
+    publisher = MqttPublisher(AddonOptions(), "1.1.1")
     published: list[tuple] = []
 
     class FakeClient:

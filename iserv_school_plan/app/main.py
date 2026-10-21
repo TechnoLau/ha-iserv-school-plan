@@ -25,7 +25,7 @@ from .plan import (
     select_plan,
 )
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -104,7 +104,8 @@ class Addon:
         config = supervisor_mqtt_config()
         if not config:
             _LOGGER.warning(
-                "MQTT-Dienst des Supervisors nicht erreichbar - versuche %s:%s",
+                "MQTT-Zugangsdaten nicht vom Supervisor erhalten - versuche "
+                "Standard-Broker %s:%s",
                 options.mqtt_host,
                 options.mqtt_port,
             )
@@ -295,7 +296,10 @@ class Addon:
         fetched_at = dataset.fetched_at if dataset else None
         age = int((now - fetched_at).total_seconds() // 60) if fetched_at else None
         lesson = result.first_lesson
-        start = result.start.isoformat() if result.start else None
+        # ``start`` ist die Uhrzeit im 24-Stunden-Format (z. B. 07:45), also das,
+        # was als Sensor-Zustand und in Automationen direkt brauchbar ist.
+        start = result.start.strftime("%H:%M") if result.start else None
+        start_iso = result.start.isoformat() if result.start else None
         warnings = list(dataset.warnings if dataset else [])
         warnings.extend(self.holidays.warnings)
 
@@ -304,7 +308,7 @@ class Addon:
             "mqtt_connected": self.publisher.connected,
             "status": result.status,
             "start": start,
-            "start_iso": start,
+            "start_iso": start_iso,
             "period": result.first_period,
             "hours_until": hours_until(now, result.start),
             "subject": lesson.subject if lesson else None,

@@ -136,7 +136,7 @@ Alle Entities hängen am Gerät „IServ Stundenplan“.
 | --- | --- | --- |
 | `sensor.stundenplan_status` | Sensor | `verbinden` (Start/keine Daten), `verbunden` oder `verbindung fehlgeschlagen` |
 | `sensor.erste_unterrichtsstunde` | Sensor | Stundennummer der ersten stattfindenden Stunde; `unknown`, wenn keine berechnet werden kann |
-| `sensor.naechster_schultag` | Datum | Datum des nächsten Schultags mit stattfindender Stunde |
+| `sensor.naechster_schultag` | Sensor | Uhrzeit der ersten Stunde am nächsten Schultag im 24-Stunden-Format (`07:45`); `unknown`, wenn keine Stunde bekannt ist. Das Datum steht im Attribut `date` |
 | `binary_sensor.wecker_morgen` | Binary Sensor | `on` nur, wenn **morgen** ein Schultag mit stattfindender Stunde ist (Sa/So immer `off`) |
 
 Die Entity-IDs sind Vorschläge von MQTT Discovery: Sie gelten beim ersten
@@ -149,7 +149,9 @@ Zusatzinformationen als Attribute:
 - **Erste Unterrichtsstunde:** `start` (`07:45`), `start_iso` (ISO 8601 mit
   Zeitzone), `hours_until` (ganze Stunden ab jetzt), `target_date`, `subject`,
   `room`, `planned_first_period`, `cancelled_periods`
-- **Nächster Schultag:** `reason`, `status`, `cancelled_periods`
+- **Nächster Schultag:** `date` (ISO-Datum), `start`, `start_iso`,
+  `hours_until`, `period`, `subject`, `room`, `planned_first_period`, `reason`,
+  `status`, `cancelled_periods`
 - **Wecker morgen:** `date`, `start`, `period`, `subject`, `room`, `reason`
   (z. B. `Wochenende`, `Herbstferien`, `keine Daten`) und `plan_status`
 - **Status:** `reason`, `plan_status` (`ok`, `ferien`, `kein_unterricht`,
