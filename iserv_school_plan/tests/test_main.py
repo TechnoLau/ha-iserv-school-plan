@@ -144,6 +144,74 @@ def test_should_refresh_waits_after_failed_first_fetch() -> None:
     assert addon.should_refresh(now) is True
 
 
+def test_should_refresh_backs_off_after_repeated_failures() -> None:
+    """Nach mehreren Fehlversuchen waechst die Wartezeit (hier 20 Minuten)."""
+    now = datetime(2026, 10, 19, 10, 0, tzinfo=TZ)
+    addon = make_addon(refresh_minutes=30)
+    addon.last_error = "HTTP 500"
+    addon.failure_count = 3
+    addon.last_attempt = now - timedelta(minutes=15)
+    assert addon.should_refresh(now) is False
+
+    addon.last_attempt = now - timedelta(minutes=21)
+    assert addon.should_refresh(now) is True
+
+    # Nach vielen Fehlversuchen bleibt es bei hoechstens einer Stunde.
+    addon.failure_count = 12
+    addon.last_attempt = now - timedelta(minutes=59)
+    assert addon.should_refresh(now) is False
+    addon.last_attempt = now - timedelta(minutes=61)
+    assert addon.should_refresh(now) is True
+
+
+def test_should_refresh_uses_normal_interval_after_filter_error() -> None:
+    """Ein abgelehnter Filter (HTTP 400) wird nicht im Minutentakt wiederholt."""
+    now = datetime(2026, 10, 19, 10, 0, tzinfo=TZ)
+    addon = make_addon(refresh_minutes=30)
+    addon.last_error = (
+        "Plan-Abruf fehlgeschlagen (HTTP 400): Die erforderliche Eigenschaft classes fehlt."
+    )
+    addon.failure_count = 1
+    addon.filter_contract_error = True
+    addon.last_attempt = now - timedelta(minutes=10)
+    assert addon.should_refresh(now) is False
+
+    addon.last_attempt = now - timedelta(minutes=31)
+    assert addon.should_refresh(now) is True
+
+
+def test_refresh_marks_filter_error_and_keeps_last_dataset() -> None:
+    """Der Filterfehler wird erkannt; der letzte gute Stand bleibt erhalten."""
+    addon = make_addon()
+    now = datetime(2026, 10, 20, 7, 0, tzinfo=TZ)
+    dataset = make_dataset(now)
+    addon.dataset = dataset
+
+    class FailingClient:
+        last_raw = ""
+        last_content_type = ""
+        last_url = ""
+
+        def fetch_dataset(self, default_year=None):  # noqa: ARG002 - Testdouble
+            raise FetchError(
+                "Plan-Abruf fehlgeschlagen (HTTP 400): "
+                "Die erforderliche Eigenschaft classes fehlt."
+            )
+
+        def invalidate_session(self) -> None:
+            return None
+
+    addon.client = FailingClient()
+    addon.refresh(now)
+
+    assert addon.filter_contract_error is True
+    assert addon.failure_count == 1
+    assert addon.dataset is dataset
+    assert "Eigenschaft classes" in (addon.last_error or "")
+    state = addon.build_state(now)
+    assert state["status"] == "ok"
+
+
 def test_cache_roundtrip(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main_module, "DATA_DIR", tmp_path)
     monkeypatch.setattr(main_module, "CACHE_FILE", tmp_path / "cache.json")

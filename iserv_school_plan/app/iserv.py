@@ -50,6 +50,20 @@ PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
 # mit ``/iserv/timetable/data?filter={"startDate":"19.10.2026",...}`` nach - die
 # HTML-Seite selbst enthaelt oft nur die Kopfzeilen der Tabelle.
 TIMETABLE_DATA_PATH = "timetable/data"
+# Manche Installationen liefern dieselbe Schnittstelle unter dem Bindestrich-Pfad
+# (in freien IServ-Clients belegt: ``/iserv/time-table/data``). Er wird nur
+# probiert, wenn der obige Pfad mit 404 antwortet.
+TIMETABLE_DATA_ALIAS_PATHS = ("time-table/data",)
+# Das Modul verlangt im Filter die Eigenschaften ``classes``, ``teachers`` und
+# ``rooms``. Fehlt eine davon, antwortet es mit HTTP 400 und dem Text
+# „Die erforderliche Eigenschaft classes fehlt.“ - genau dieser Fehler trat mit
+# 1.0.11 auf, weil nur startDate/endDate gesendet wurden.
+# Belegt sind zwei Schreibweisen: leere Listen (Browser/ranzenpost) und ``%``
+# als Platzhalter (iserv-mcp). Welche eine Instanz liefert, wird zur Laufzeit
+# ermittelt und gemerkt.
+PORTAL_FILTER_EMPTY = "leere Listen"
+PORTAL_FILTER_WILDCARD = "Platzhalter %"
+PORTAL_FILTER_VARIANTS = (PORTAL_FILTER_EMPTY, PORTAL_FILTER_WILDCARD)
 # Zeitfenster fuer den Filter (heute rueckwaerts/vorwaerts in Tagen). Der
 # Vorlauf deckt die Vorschau des Add-ons (max. 14 Tage) mit Reserve ab.
 PORTAL_DAYS_BACK = 1
@@ -480,6 +494,9 @@ class IservClient:
         # Struktur der letzten JSON-Antwort (falls sie keine Stunden enthielt) -
         # landet in der Fehlermeldung, damit die Schnittstelle nachvollziehbar ist.
         self._portal_hint = ""
+        # Filtervariante, die auf dieser Instanz Stunden liefert (sonst None).
+        # Damit kostet jede weitere Woche nur eine Anfrage statt zwei.
+        self._portal_filter_choice: str | None = None
 
     def _request(
         self,
@@ -952,58 +969,119 @@ class IservClient:
             monday += timedelta(days=7)
         return weeks
 
-    def _portal_data_urls(self) -> list[str]:
-        """Kandidaten der JSON-Schnittstelle der Stundenplanansicht.
+    def _portal_filter_payload(
+        self, start: date, end: date, variant: str = PORTAL_FILTER_VARIANTS[0]
+    ) -> dict:
+        """Filter fuer genau eine Woche - mit den Pflichtfeldern des Moduls.
 
-        Der Browser ruft ``/iserv/timetable/data?filter={"startDate":"19.10.2026",
-        "endDate":"25.10.2026"}`` auf - also genau eine Woche. Der Filter wird
-        hier fuer jede Woche des Vorschaufensters gebaut (``TT.MM.JJJJ``).
-        Zusaetzlich wird die Adresse ohne Filter probiert - aeltere
-        Installationen liefern die Woche dann ungefiltert.
+        ``classes``, ``teachers`` und ``rooms`` gehoeren zwingend dazu: Ohne sie
+        antwortet IServ mit HTTP 400 und „Die erforderliche Eigenschaft classes
+        fehlt.“ (so bei 1.0.11, das nur startDate/endDate sendete). Belegt sind
+        leere Listen (Browser/ranzenpost) und ``%`` als Platzhalter (iserv-mcp).
+        """
+        payload: dict[str, object] = {
+            "startDate": start.strftime("%d.%m.%Y"),
+            "endDate": end.strftime("%d.%m.%Y"),
+        }
+        if variant == PORTAL_FILTER_WILDCARD:
+            payload.update({"classes": ["%"], "teachers": ["%"], "rooms": ["%"]})
+        else:
+            payload.update({"classes": [], "teachers": [], "rooms": []})
+        return payload
+
+    def _portal_data_url(
+        self,
+        base: str,
+        start: date,
+        end: date,
+        variant: str = PORTAL_FILTER_VARIANTS[0],
+    ) -> str:
+        """URL einer Wochenabfrage mit dem Filter als JSON in der Query."""
+        filter_json = json.dumps(
+            self._portal_filter_payload(start, end, variant), separators=(",", ":")
+        )
+        return f"{base}?{urlencode({'filter': filter_json})}"
+
+    def _portal_filter_order(self) -> list[str]:
+        """Filtervarianten in der Reihenfolge, in der sie probiert werden.
+
+        Sobald eine Variante Stunden geliefert hat, steht sie vorn - dann kostet
+        jede weitere Woche nur noch eine Anfrage.
+        """
+        if self._portal_filter_choice in PORTAL_FILTER_VARIANTS:
+            return [self._portal_filter_choice] + [
+                variant
+                for variant in PORTAL_FILTER_VARIANTS
+                if variant != self._portal_filter_choice
+            ]
+        return list(PORTAL_FILTER_VARIANTS)
+
+    def _portal_data_urls(self) -> list[str]:
+        """Je Woche eine URL (bevorzugte Filtervariante) plus filterlose Adresse.
+
+        Der Filter umfasst immer genau Montag bis Sonntag (``TT.MM.JJJJ``); ein
+        groesserer Zeitraum wird vom Modul mit HTTP 400 abgewiesen und kommt
+        deshalb hier nicht vor.
         """
         base = _iserv_url(self.options.base_url, TIMETABLE_DATA_PATH)
-        urls: list[str] = []
-        for start, end in self._portal_weeks():
-            filter_json = json.dumps(
-                {
-                    "startDate": start.strftime("%d.%m.%Y"),
-                    "endDate": end.strftime("%d.%m.%Y"),
-                },
-                separators=(",", ":"),
-            )
-            urls.append(f"{base}?{urlencode({'filter': filter_json})}")
+        variant = self._portal_filter_order()[0]
+        urls = [
+            self._portal_data_url(base, start, end, variant)
+            for start, end in self._portal_weeks()
+        ]
         urls.append(base)
         return urls
 
-    def _portal_variants(self) -> list[tuple[str, str, dict, str]]:
-        """Varianten des JSON-Abrufs: ``(Label, URL, Header, Accept)``.
+    def _portal_headers(self) -> tuple[dict, dict]:
+        """Header wie der Browser (XHR) und ohne ``X-Requested-With``.
 
-        IServ-Instanzen reagieren unterschiedlich auf ``X-Requested-With``:
-        Der Browser-Aufruf der Ansicht kommt je nach Version mit oder ohne
-        diesem Header. Beide Formen werden fuer die erste Woche probiert, die
-        weiteren Wochen dann nur mit dem Header - jede Anfrage kostet Zeit.
-        ``Accept`` bleibt immer ``*/*`` (siehe :data:`ACCEPT_ANY`).
+        Je nach IServ-Version kommt der AJAX-Aufruf der Ansicht mit oder ohne
+        diesen Header. Beide Formen werden nur bei der allerersten Anfrage
+        probiert - jede Anfrage kostet Zeit.
         """
         referer = self.last_url or self.options.resolved_plan_url
         xhr = {"X-Requested-With": "XMLHttpRequest"}
         if referer:
             xhr["Referer"] = referer
         plain = {"Referer": referer} if referer else {}
-        urls = self._portal_data_urls()
-        variants: list[tuple[str, str, dict, str]] = []
-        for position, (url, (start, _)) in enumerate(
-            zip(urls, self._portal_weeks())
-        ):
-            label = (
-                "data?filter"
-                if position == 0
-                else f"data?filter KW {start.strftime('%d.%m.')}"
+        return xhr, plain
+
+    def _portal_request(
+        self, url: str, headers: dict, label: str, note
+    ) -> tuple[int | None, str, str, str]:
+        """Eine JSON-Anfrage; Fehlschlaege landen als Hinweis in ``note``.
+
+        Rueckgabe ``(Status, Text, Content-Type, Endadresse)``. ``Status`` ist
+        ``200`` bei JSON, ``0`` bei fremdem Inhalt und ``None`` bei Netzfehlern.
+        """
+        self._tried_urls.add(url)
+        try:
+            text, content_type, final_url = self._plan_request(url, ACCEPT_ANY, headers)
+        except HTTPError as err:
+            body = ""
+            try:
+                body = err.read().decode("utf-8", errors="replace")
+            except (OSError, ValueError):  # pragma: no cover - Body nicht lesbar
+                body = ""
+            note(f"{label}: HTTP {err.code} {_short_body(body, 200)}".strip())
+            _LOGGER.debug(
+                "IServ-JSON %s nicht abrufbar: HTTP %s %s", url, err.code, body[:300]
             )
-            variants.append((label, url, xhr, ACCEPT_ANY))
-            if position == 0:
-                variants.append((f"{label} ohne XHR", url, plain, ACCEPT_ANY))
-        variants.append(("data", urls[-1], xhr, ACCEPT_ANY))
-        return variants
+            return err.code, "", "", url
+        except (URLError, IservError) as err:
+            note(f"{label}: {err}")
+            _LOGGER.debug("IServ-JSON %s nicht abrufbar: %s", url, err)
+            return None, "", "", url
+        if detect_format(text, content_type) != "json":
+            note(
+                f"{label}: {content_type or 'ohne Content-Type'} "
+                f"({len(text)} Zeichen: {_short_body(text, 60)})"
+            )
+            _LOGGER.debug(
+                "IServ-JSON %s lieferte kein JSON (Content-Type %s)", url, content_type
+            )
+            return 0, text, content_type, final_url
+        return 200, text, content_type, final_url
 
     def _try_portal_json(self, default_year: int | None) -> PlanDataset | None:
         """Liest den Plan aus der JSON-Schnittstelle der Web-Oberflaeche.
@@ -1016,8 +1094,14 @@ class IservClient:
         Die Schnittstelle liefert pro Anfrage genau eine Woche; die Antworten
         werden zu einem Datensatz zusammengefasst. Jeder Fehlversuch
         (HTTP-Status, Content-Type, Antwortanfang) landet in ``_portal_hint``
-        und damit in der Fehlermeldung - sonst sieht ein 401 aus wie
+        und damit in der Fehlermeldung - sonst sieht ein 400 aus wie
         "keine Daten".
+
+        Der Filter enthaelt seit 1.0.12 die Pflichtfelder ``classes``,
+        ``teachers`` und ``rooms``. Liefert eine Schreibweise keine Stunden,
+        wird in der ersten Woche die andere probiert; die erfolgreiche wird
+        gemerkt. Ein abgelehnter Filter beendet den Abruf sofort - sonst
+        entstehen bei jedem Lauf Dutzende sinnlose Anfragen.
         """
         notes: list[str] = []
 
@@ -1027,59 +1111,9 @@ class IservClient:
 
         merged: PlanDataset | None = None
         lesson_keys: set[tuple] = set()
-        ok_urls: set[str] = set()
-        seen: set[tuple[str, str]] = set()
-        for label, url, headers, accept in self._portal_variants():
-            if merged is not None and label == "data":
-                # Filterlose Adresse ist nur Notnagel - die Stunden sind schon da.
-                break
-            if url in ok_urls:
-                # Diese Woche hat mit anderem Header schon geliefert.
-                continue
-            key = (url, headers.get("X-Requested-With") or "")
-            if key in seen:
-                continue
-            seen.add(key)
-            self._tried_urls.add(url)
-            try:
-                text, content_type, final_url = self._plan_request(url, accept, headers)
-            except HTTPError as err:
-                body = ""
-                try:
-                    body = err.read().decode("utf-8", errors="replace")
-                except (OSError, ValueError):  # pragma: no cover - Body nicht lesbar
-                    body = ""
-                note(f"{label}: HTTP {err.code} {_short_body(body, 200)}".strip())
-                _LOGGER.debug(
-                    "IServ-JSON %s nicht abrufbar: HTTP %s %s", url, err.code, body[:300]
-                )
-                continue
-            except (URLError, IservError) as err:
-                note(f"{label}: {err}")
-                _LOGGER.debug("IServ-JSON %s nicht abrufbar: %s", url, err)
-                continue
-            if detect_format(text, content_type) != "json":
-                note(
-                    f"{label}: {content_type or 'ohne Content-Type'} "
-                    f"({len(text)} Zeichen: {_short_body(text, 60)})"
-                )
-                _LOGGER.debug(
-                    "IServ-JSON %s lieferte kein JSON (Content-Type %s)", url, content_type
-                )
-                continue
-            dataset = PlanDataset(source=url)
-            try:
-                dataset = self._parse_dataset(text, content_type, default_year, fmt="json")
-            except (ValueError, TypeError):
-                dataset = PlanDataset(source=url)
-            if not dataset.days:
-                dataset = parse_portal_json(
-                    text, source=url, default_year=default_year
-                )
-            if not dataset.days:
-                note(f"{label}: JSON {json_summary(text)}")
-                _LOGGER.debug("IServ-JSON %s ohne Stunden (%s)", url, notes[-1])
-                continue
+
+        def merge(dataset: PlanDataset, url: str) -> None:
+            nonlocal merged
             if merged is None:
                 merged = PlanDataset(source=url)
             for day_plan in dataset.days.values():
@@ -1100,16 +1134,99 @@ class IservClient:
             for warning in dataset.warnings:
                 if warning not in merged.warnings:
                     merged.warnings.append(warning)
-            self.last_raw = text
-            self.last_content_type = content_type
-            self.last_url = final_url
-            ok_urls.add(url)
-            _LOGGER.debug(
-                "IServ-JSON %s: %d Tag(e), %d Stunde(n)",
-                url,
-                len(dataset.days),
-                sum(len(day.lessons) for day in dataset.days.values()),
-            )
+
+        paths = (TIMETABLE_DATA_PATH, *TIMETABLE_DATA_ALIAS_PATHS)
+        weeks = self._portal_weeks()
+        xhr, plain = self._portal_headers()
+        first_request = True
+        stop_all = False
+        for route, path in enumerate(paths):
+            if route > 0 and (merged is not None or stop_all):
+                break
+            base = _iserv_url(self.options.base_url, path)
+            route_name = "data" if route == 0 else "time-table/data"
+            route_missing = False
+            for position, (start, end) in enumerate(weeks):
+                if stop_all or route_missing:
+                    break
+                order = self._portal_filter_order()
+                statuses: list[int | None] = []
+                for variant in order:
+                    if position > 0 and variant != order[0]:
+                        # Nur in der ersten Woche beide Schreibweisen testen.
+                        break
+                    url = self._portal_data_url(base, start, end, variant)
+                    label = f"{route_name}?filter KW {start.strftime('%d.%m.')}"
+                    if variant == PORTAL_FILTER_WILDCARD:
+                        label += " (Platzhalter %)"
+                    candidates = [(label, xhr)]
+                    if first_request:
+                        # Erste Anfrage: zusaetzlich ohne XHR, weil Instanzen
+                        # unterschiedlich auf den Header reagieren.
+                        candidates.append((f"{label} ohne XHR", plain))
+                    first_request = False
+                    status: int | None = None
+                    text = content_type = final_url = ""
+                    for name, headers in candidates:
+                        status, text, content_type, final_url = self._portal_request(
+                            url, headers, name, note
+                        )
+                        statuses.append(status)
+                        if status == 200 or status not in (401, 403, 0):
+                            break
+                    if status in PLAN_PATH_MISSING_CODES:
+                        route_missing = position == 0
+                        break
+                    if status in (401, 403):
+                        # Ohne akzeptierte Sitzung scheitert jede Woche gleich.
+                        stop_all = True
+                        break
+                    if status != 200:
+                        continue
+                    dataset = PlanDataset(source=url)
+                    try:
+                        dataset = self._parse_dataset(
+                            text, content_type, default_year, fmt="json"
+                        )
+                    except (ValueError, TypeError):
+                        dataset = PlanDataset(source=url)
+                    if not dataset.days:
+                        dataset = parse_portal_json(
+                            text, source=url, default_year=default_year
+                        )
+                    if not dataset.days:
+                        note(f"{label}: JSON {json_summary(text)}")
+                        _LOGGER.debug("IServ-JSON %s ohne Stunden (%s)", url, notes[-1])
+                        continue
+                    merge(dataset, url)
+                    self.last_raw = text
+                    self.last_content_type = content_type
+                    self.last_url = final_url
+                    # Diese Schreibweise funktioniert - weitere Wochen kosten
+                    # damit nur noch eine Anfrage.
+                    self._portal_filter_choice = variant
+                    _LOGGER.debug(
+                        "IServ-JSON %s: %d Tag(e), %d Stunde(n)",
+                        url,
+                        len(dataset.days),
+                        sum(len(day.lessons) for day in dataset.days.values()),
+                    )
+                    break
+                if stop_all or route_missing:
+                    break
+                if position == 0 and statuses and all(
+                    status in (400, 0) for status in statuses
+                ):
+                    # Der Filter wird abgelehnt - alle weiteren Wochen wuerden
+                    # mit demselben Fehler antworten.
+                    note("Filter des Stundenplanmoduls abgelehnt - keine weiteren Wochen")
+                    stop_all = True
+                    break
+            if stop_all:
+                break
+            if route == 0 and not route_missing:
+                # Der Standardpfad antwortet - der Bindestrich-Pfad bringt nichts.
+                break
         if merged is not None and merged.days:
             _LOGGER.info(
                 "Stundenplan aus der IServ-JSON-Schnittstelle gelesen: %d Tag(e), "

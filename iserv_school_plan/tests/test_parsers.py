@@ -433,3 +433,215 @@ def test_parse_portal_json_period_grid_without_subject_is_ignored() -> None:
     dataset = parse_portal_json(text, default_year=2026)
     assert dataset.days == {}
 
+
+
+def test_parse_portal_json_falls_back_to_plain_timetable() -> None:
+    """Ohne ``data.timetable`` gilt ``plain-timetable`` - aber nie beide Listen."""
+    text = json.dumps(
+        {
+            "meta": {"filter": {"startDate": "19.10.2026"}},
+            "data": {
+                "timetable": [],
+                "plain-timetable": [
+                    {"dow": 1, "period": 1, "subject": "Mathematik", "room": "A1"}
+                ],
+            },
+            "plain-changes": [
+                {"dow": 1, "period": 1, "subject": "Mathematik", "room": "A1"}
+            ],
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    monday = dataset.days[date(2026, 10, 19)]
+    assert [lesson.subject for lesson in monday.lessons] == ["Mathematik"]
+
+
+def test_parse_portal_json_uses_meta_filter_as_week_anchor() -> None:
+    """``meta.filter.startDate`` liefert das Datum zu ``dow`` (IServ: 1 = Montag)."""
+    text = json.dumps(
+        {
+            "meta": {
+                "filter": {
+                    "startDate": "19.10.2026",
+                    "endDate": "25.10.2026",
+                    "classes": ["10a"],
+                }
+            },
+            "data": {
+                "timetable": [
+                    {"dow": 1, "period": 2, "subject": "Biologie", "room": "C3"},
+                    {"dow": 5, "period": 1, "subject": "Sport", "room": "Halle"},
+                ],
+                "plain-timetable": [
+                    {"dow": 1, "period": 2, "subject": "Biologie", "room": "C3"}
+                ],
+            },
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    assert sorted(dataset.days) == [date(2026, 10, 19), date(2026, 10, 23)]
+    assert dataset.days[date(2026, 10, 19)].lessons[0].subject == "Biologie"
+    assert dataset.days[date(2026, 10, 23)].lessons[0].subject == "Sport"
+
+
+def test_parse_portal_json_without_week_anchor_ignores_dow() -> None:
+    """Ohne Wochenanker ist ein Wochentag kein Datum - keine geratenen Stunden."""
+    text = json.dumps(
+        {"data": {"timetable": [{"dow": 1, "period": 1, "subject": "Mathematik"}]}}
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    assert dataset.days == {}
+
+
+def test_parse_portal_json_change_types_cancels_lesson() -> None:
+    """``change_types`` enthaelt bei Ausfall ``"0"``; Ersatzfach/-raum gilt."""
+    text = json.dumps(
+        {
+            "meta": {"filter": {"startDate": "19.10.2026"}},
+            "data": {
+                "timetable": [
+                    {
+                        "dow": 1,
+                        "period": 1,
+                        "subject": "Mathematik",
+                        "room": "A1",
+                        "change": {
+                            "change_types": ["0"],
+                            "substitutionSubject": "",
+                            "substitutionRoom": "",
+                        },
+                    },
+                    {
+                        "dow": 2,
+                        "period": 1,
+                        "subject": "Englisch",
+                        "room": "B2",
+                        "change": {
+                            "change_types": ["1"],
+                            "substitutionSubject": "Franzoesisch",
+                            "substitutionRoom": "C1",
+                        },
+                    },
+                ]
+            },
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    monday = dataset.days[date(2026, 10, 19)].lessons[0]
+    assert monday.cancelled is True
+    assert monday.subject == "Mathematik"
+    tuesday = dataset.days[date(2026, 10, 20)].lessons[0]
+    assert tuesday.cancelled is False
+    assert (tuesday.subject, tuesday.room) == ("Franzoesisch", "C1")
+
+
+def test_parse_portal_json_reads_dsa_students_entries() -> None:
+    """DieSchulApp: ``students[].entries[]`` mit ``weekday`` 0=Montag."""
+    text = json.dumps(
+        {
+            "meta": {"filter": {"startDate": "19.10.2026"}},
+            "students": [
+                {
+                    "entries": [
+                        {
+                            "weekday": 2,
+                            "timeTableSlot": {
+                                "number": 4,
+                                "startTime": "10:40",
+                                "endTime": "11:25",
+                            },
+                            "courseSubject": {
+                                "subject": {"name": "Physik", "acronym": "PH"},
+                                "course": {"name": "10a"},
+                                "teachers": [{"surname": "Muster"}],
+                            },
+                            "room": {"name": "C3"},
+                        }
+                    ]
+                }
+            ],
+        }
+    )
+    dataset = parse_portal_json(text, default_year=2026)
+    lesson = dataset.days[date(2026, 10, 21)].lessons[0]
+    assert (lesson.period, lesson.subject, lesson.room) == (4, "Physik", "C3")
+    assert lesson.start == time(10, 40)
+
+
+
+
+# --- Wochengitter ohne Datum: Wochenanker ------------------------------------
+
+
+def test_week_grid_without_dates_uses_page_filter_anchor() -> None:
+    """Spalten nur mit Wochentagen: das Filter-JSON der Seite liefert die Daten."""
+    html = (
+        "<html><body>"
+        "<script type=\"application/json\">"
+        '{"filter":{"startDate":"19.10.2026","endDate":"25.10.2026"}}'
+        "</script>"
+        "<table><tr><th>Std.</th><th>Montag</th><th>Dienstag</th></tr>"
+        "<tr><td>1</td><td>Mathematik<br>A1</td><td>Deutsch<br>B2</td></tr></table>"
+        "</body></html>"
+    )
+    dataset = parse_html(html)
+    assert dataset.days[date(2026, 10, 19)].lessons[0].subject == "Mathematik"
+    assert dataset.days[date(2026, 10, 19)].lessons[0].room == "A1"
+    assert dataset.days[date(2026, 10, 20)].lessons[0].subject == "Deutsch"
+
+
+def test_week_grid_without_dates_uses_heading_range_anchor() -> None:
+    """Ueberschrift ``19.10. - 25.10.2026`` legt den Wochenanfang fest."""
+    html = (
+        "<html><body><h2>Woche 19.10. - 25.10.2026</h2>"
+        "<table><tr><th>Std</th><th>Montag</th><th>Freitag</th></tr>"
+        "<tr><td>2</td><td>Physik<br>C3</td><td>Kunst<br>D4</td></tr></table>"
+        "</body></html>"
+    )
+    dataset = parse_html(html)
+    assert dataset.days[date(2026, 10, 19)].lessons[0].subject == "Physik"
+    assert dataset.days[date(2026, 10, 23)].lessons[0].subject == "Kunst"
+
+
+def test_week_grid_without_dates_uses_calendar_week_anchor() -> None:
+    """``KW 43`` genuegt als Anker, wenn die Seite keinen Zeitraum nennt."""
+    html = (
+        "<html><body><h3>Stundenplan KW 43/2026</h3>"
+        "<table><tr><th>Std</th><th>Mittwoch</th><th>Donnerstag</th></tr>"
+        "<tr><td>1</td><td>Chemie<br>E2</td><td>Musik<br>M1</td></tr></table>"
+        "</body></html>"
+    )
+    dataset = parse_html(html)
+    # KW 43/2026: Montag 19.10., Mittwoch 21.10., Donnerstag 22.10.
+    assert dataset.days[date(2026, 10, 21)].lessons[0].subject == "Chemie"
+    assert dataset.days[date(2026, 10, 22)].lessons[0].subject == "Musik"
+
+
+def test_week_grid_without_anchor_is_ignored_with_context() -> None:
+    """Ohne Datum und ohne Anker bleibt das Gitter unausgewertet - mit Details."""
+    html = (
+        "<table><tr><th>Std</th><th>Montag</th><th>Dienstag</th></tr>"
+        "<tr><td>1</td><td>Mathematik</td><td>Deutsch</td></tr></table>"
+    )
+    dataset = parse_html(html)
+    assert dataset.days == {}
+    warning = next(w for w in dataset.warnings if "ohne Wochenanker" in w)
+    assert "2 Zeilen" in warning
+    assert "Montag" in warning
+
+
+def test_table_summary_names_missing_week_anchor() -> None:
+    summary = table_summary(
+        "<table><tr><th>Std</th><th>Montag</th><th>Dienstag</th></tr></table>"
+    )
+    assert "Wochengitter ohne Datum" in summary
+    assert "kein Wochenanker" in summary
+
+
+def test_table_summary_names_week_anchor() -> None:
+    summary = table_summary(
+        "<h2>19.10. - 25.10.2026</h2>"
+        "<table><tr><th>Std</th><th>Montag</th><th>Dienstag</th></tr></table>"
+    )
+    assert "Wochengitter ohne Datum" in summary
+    assert "Wochenanker 19.10.2026" in summary

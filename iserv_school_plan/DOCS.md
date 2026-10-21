@@ -64,20 +64,31 @@ Repositories.
   Stundenplan-Wochenansicht (Wochentage als Spalten, Stunden als Zeilen,
   verbundene Zellen für Doppelstunden) aus. Zusätzlich wird ein auf der Seite
   verlinkter iCal-Export genutzt, wenn die HTML-Auswertung keine Zeilen liefert.
-  Meldet das Add-on „Wochengitter ohne Datum“, enthalten die Spaltenköpfe nur
-  Wochentage: dann die persönliche iCal-Export-Adresse aus IServ als `plan_url`
-  mit `plan_format: ics` eintragen. Zeigen die Tabellen in der Meldung nur
+  Meldet das Add-on „Wochengitter ohne Datum und ohne Wochenanker“, enthalten die
+  Spaltenköpfe nur Wochentage und die Seite liefert keinen Anker: Seit **1.0.12**
+  wertet das Add-on solche Gitter aus, wenn es einen Wochenanfang findet – das
+  Filter-JSON der Ansicht (`"startDate": "19.10.2026"`), einen Zeitraum in der
+  Überschrift (`19.10. - 25.10.2026`) oder `KW 43`. Die Warnung nennt Zeilenzahl
+  und Kopfzeile, `table_summary` zusätzlich `Wochenanker 19.10.2026` bzw.
+  `kein Wochenanker`. Bleibt es bei `kein Wochenanker`: die persönliche
+  iCal-Export-Adresse aus IServ als `plan_url` mit `plan_format: ics` eintragen.
+  Zeigen die Tabellen in der Meldung nur
   **eine** Zeile (z. B. `1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'`),
   stehen im HTML überhaupt keine Unterrichtszeilen – IServ lädt sie in der neuen
   Oberfläche per JavaScript nach (`portal.js`). Ab Version 1.0.9 holt das Add-on
   die Stunden deshalb selbst über die JSON-Schnittstelle der Ansicht
-  (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, mit
-  der bestehenden Anmeldung, `X-Requested-With: XMLHttpRequest` und
+  (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…","classes":[],"teachers":[],"rooms":[]}`,
+  mit der bestehenden Anmeldung, `X-Requested-With: XMLHttpRequest` und
   `Accept: */*` – `application/json` wertet IServ als API-Aufruf und antwortet
   mit HTTP 401, deshalb seit 1.0.10 nicht mehr). Der Filter umfasst seit 1.0.11
   **genau eine Woche** (Montag bis Sonntag), weil das Modul größere Zeiträume
   mit HTTP 400 („Fehler beim Verarbeiten der Anfrage“) abweist; die Antworten
-  der Wochen werden zusammengefasst. Erkennt der Parser die Antwort
+  der Wochen werden zusammengefasst. Seit **1.0.12** stehen zusätzlich
+  `classes`, `teachers` und `rooms` im Filter – ohne sie antwortet das Modul mit
+  HTTP 400 und „Die erforderliche Eigenschaft classes fehlt.“ (der Fehler aus
+  1.0.11). Bleibt eine Schreibweise ohne Stunden, probiert das Add-on `["%"]`
+  als Platzhalter und merkt sich die funktionierende; ein abgelehnter Filter
+  beendet den Abruf nach der ersten Woche. Erkennt der Parser die Antwort
   nicht, steht ihre Struktur als `[JSON: …]` in `last_error` (nur Schlüssel,
   keine Namen); seit 1.0.10 zusätzlich der HTTP-Status je Versuch. Alternativ
   bleibt der iCal-Export als `plan_url` mit `plan_format: ics` (Adresse muss

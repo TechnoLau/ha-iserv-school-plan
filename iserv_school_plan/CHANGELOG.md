@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.0.12
+
+- Fehler aus 1.0.11 behoben: Der Filter der JSON-Schnittstelle enthielt nur
+  `startDate`/`endDate`. IServ verlangt aber `classes`, `teachers` und `rooms`
+  und antwortet sonst mit HTTP 400 und „Die erforderliche Eigenschaft classes
+  fehlt.“ - deshalb kam seit 1.0.11 keine einzige Stunde mehr an. Der Filter
+  wird jetzt immer vollstaendig gebaut (`classes: []` usw.); liefert diese
+  Schreibweise keine Stunden, wird zusaetzlich die Platzhalter-Variante
+  (`["%"]`) probiert und die funktionierende gemerkt
+- Ein abgelehnter Filter beendet den Abruf nach der ersten Woche. Vorher
+  fragten alle Wochen und beide Header-Varianten denselben Fehler ab (ueber ein
+  Dutzend Anfragen pro Lauf); nach einem HTTP 400 gilt ausserdem das normale
+  Aktualisierungsintervall statt eines Versuchs alle fuenf Minuten. Bei anderen
+  Fehlern waechst die Wartezeit jetzt 5 → 10 → 20 → 40 → 60 Minuten
+- Fehlt `/iserv/timetable/data` (HTTP 404), wird `/iserv/time-table/data`
+  probiert - je nach Installation heisst das Modul anders
+- JSON-Auswertung: `data.timetable` wird bevorzugt und `plain-timetable` nur als
+  Rueckfallebene gelesen (vorher standen alle Stunden doppelt im Plan).
+  Stunden ohne Datum erhalten ihr Datum aus `meta.filter.startDate` plus
+  `dow` (IServ, 1 = Montag) bzw. `weekday` (DieSchulApp, 0 = Montag). Das
+  Vertretungsobjekt `change` wird ausgewertet: `change_types` mit `"0"` gilt als
+  Ausfall, `substitutionSubject`/`substitutionRoom` als Ersatz. Die
+  DieSchulApp-Form `students[].entries[]` (Stunde aus `timeTableSlot`, Fach aus
+  `courseSubject`) wird gelesen
+- Wochengitter ohne Datum: Beschriftet IServ die Spalten nur mit Wochentagen
+  („Montag“ … „Freitag“), kommt der Wochenanfang jetzt aus dem Filter-JSON der
+  Seite, aus einem Zeitraum in der Ueberschrift (`19.10. - 25.10.2026`) oder aus
+  `KW 43`. Bisher wurden diese Gitter verworfen - der Plan blieb leer. Ohne
+  jeden Anker bleibt das Gitter unausgewertet; die Warnung nennt jetzt
+  Zeilenzahl und Kopfzeile
+- `table_summary` zeigt bei undatierten Gittern, ob ein Wochenanker gefunden
+  wurde (`Wochenanker 19.10.2026` / `kein Wochenanker`) - damit ist im Log
+  sofort erkennbar, warum ein Gitter ignoriert wurde
+- Testserver prueft den Filter wie IServ (Pflichtfelder, genau eine Woche) und
+  antwortet mit dem echten Wortlaut; neue Tests fuer Filtervarianten,
+  Abbruchverhalten, `data.timetable`, DieSchulApp-Eintraege, `change_types`,
+  Wochenanker (Filter-JSON, Zeitraum, KW) und die Zeitumstellung
+
 ## 1.0.11
 
 - Fehler aus 1.0.10 behoben: Der JSON-Abruf fragte 22 Tage auf einmal ab

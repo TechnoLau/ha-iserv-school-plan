@@ -17,13 +17,18 @@ from .iserv import IservClient, IservError, IservOptions
 from .mqtt import MqttPublisher, supervisor_mqtt_config
 from .plan import TZ, PlanDataset, apply_period_times, select_plan
 
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
 DEFAULT_MQTT_HOST = "core-mosquitto"
 TICK_SECONDS = 30
 RETRY_MINUTES = 5
+# Nach mehreren Fehlversuchen waechst die Wartezeit (5, 10, 20, 40, 60 Minuten).
+RETRY_MAX_MINUTES = 60
+# Wortlaut, mit dem IServ einen ungueltigen Filter ableitet. Ein erneuter Abruf
+# im Minutentakt bringt dann nichts - es gilt das normale Intervall.
+FILTER_ERROR_MARKERS = ("erforderliche eigenschaft", "fehler beim verarbeiten")
 NIGHT_START_HOUR = 22
 NIGHT_END_HOUR = 5
 NIGHT_MAX_AGE = timedelta(hours=6)
@@ -68,6 +73,11 @@ class Addon:
         self.dataset: PlanDataset | None = None
         self.last_error: str | None = None
         self.last_attempt: datetime | None = None
+        # Fehlversuche in Folge - bestimmt die Wartezeit bis zum naechsten Versuch.
+        self.failure_count = 0
+        # True, wenn IServ den Filter abgelehnt hat (HTTP 400): dann aendert
+        # schnelles Wiederholen nichts.
+        self.filter_contract_error = False
         self._running = True
 
     # ------------------------------------------------------------------ Cache
@@ -158,9 +168,22 @@ class Addon:
             _LOGGER.warning("Debug-Dump fehlgeschlagen: %s", err)
 
     # --------------------------------------------------------------- Abrufen
+    def _retry_delay(self) -> timedelta:
+        """Wartezeit nach einem Fehlversuch.
+
+        Ein abgelehnter Filter (HTTP 400) bleibt bei jeder Anfrage gleich - dort
+        gilt das normale Aktualisierungsintervall. Sonst verdoppelt sich die
+        Wartezeit mit jedem Fehlversuch bis maximal eine Stunde, damit ein
+        dauerhaft fehlschlagender Abruf IServ nicht im Minutentakt belastet.
+        """
+        if self.filter_contract_error:
+            return timedelta(minutes=max(RETRY_MINUTES, self.options.refresh_minutes))
+        minutes = RETRY_MINUTES * (2 ** max(0, self.failure_count - 1))
+        return timedelta(minutes=min(minutes, RETRY_MAX_MINUTES))
+
     def should_refresh(self, now: datetime) -> bool:
         if self.last_error and self.last_attempt:
-            if now - self.last_attempt < timedelta(minutes=RETRY_MINUTES):
+            if now - self.last_attempt < self._retry_delay():
                 return False
         fetched_at = self.dataset.fetched_at if self.dataset else None
         if fetched_at is None:
@@ -176,18 +199,31 @@ class Addon:
         try:
             dataset = self.client.fetch_dataset(default_year=now.year)
         except (IservError, ValueError) as err:
+            self.failure_count += 1
             self.last_error = str(err)
+            self.filter_contract_error = any(
+                marker in self.last_error.lower() for marker in FILTER_ERROR_MARKERS
+            )
             self.client.invalidate_session()
             _LOGGER.warning("Plan-Abruf fehlgeschlagen: %s", err)
+            if self.filter_contract_error:
+                _LOGGER.warning(
+                    "IServ hat den Filter der Stundenplan-Schnittstelle abgelehnt - "
+                    "naechster Versuch in %d Minuten",
+                    max(RETRY_MINUTES, self.options.refresh_minutes),
+                )
             # Auch Fehlantworten sichern - bei der neuen IServ-Web-App ist genau
             # dieses HTML die Grundlage fuer die Parser-Anpassung.
             self.dump_raw(self.client.last_raw, self.client.last_content_type)
             return
         except Exception as err:  # pragma: no cover - unerwartete Fehler sichtbar machen
+            self.failure_count += 1
             self.last_error = f"Unerwarteter Fehler: {err}"
             _LOGGER.exception("Unerwarteter Fehler beim Plan-Abruf")
             return
 
+        self.failure_count = 0
+        self.filter_contract_error = False
         dataset.fetched_at = now
         apply_period_times(dataset, self.options.parsed_period_times)
         self.dataset = dataset

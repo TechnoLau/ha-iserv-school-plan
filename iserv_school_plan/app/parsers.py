@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 
@@ -183,6 +183,84 @@ def _grid_date(text: str | None, default_year: int | None) -> date | None:
         return None
     year = default_year or datetime.now(TZ).year
     return _build_date(int(match.group(1)), int(match.group(2)), year, year)
+
+
+# Wochenanker: Die IServ-Stundenplanansicht beschriftet ihre beiden Gitter je
+# nach Version nur mit Wochentagen ("Montag" ... "Freitag"). Ohne einen Anker
+# auf der Seite laesst sich keine Stunde einem Datum zuordnen - deshalb wird
+# vor dem Verwerfen eines Gitters nach einem Zeitraum, einer Kalenderwoche oder
+# dem Filter-JSON der Ansicht gesucht.
+_WEEK_RANGE_RE = re.compile(
+    r"(\d{1,2}\.\s?\d{1,2}\.\s?(?:\d{2,4})?)\s*(?:-|–|—|bis)\s*"
+    r"(\d{1,2}\.\s?\d{1,2}\.\s?(?:\d{2,4})?)"
+)
+_KW_RE = re.compile(r"\b(?:kw|kalenderwoche)\s*\.?\s*(\d{1,2})\b", re.IGNORECASE)
+_KW_YEAR_RE = re.compile(
+    r"\b(?:kw|kalenderwoche)\s*\.?\s*\d{1,2}\s*/\s*(\d{4})\b", re.IGNORECASE
+)
+_WEEK_START_RE = re.compile(
+    r"[\"']?(?:startdate|weekstart|wochenstart|monday)[\"']?\s*[:=]\s*[\"']([^\"']{6,24})[\"']",
+    re.IGNORECASE,
+)
+
+
+def _anchor_date(value: str | None, default_year: int | None = None) -> date | None:
+    """Datum aus ``19.10.``, ``19.10.2026`` oder ``2026-10-19``."""
+    found = _grid_date(value, default_year)
+    if found is not None:
+        return found
+    iso = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", value or "")
+    if iso:
+        return _build_date(
+            int(iso.group(3)), int(iso.group(2)), int(iso.group(1)), default_year
+        )
+    return None
+
+
+def _kw_monday(text: str, default_year: int | None = None) -> date | None:
+    """Montag einer Kalenderwoche (``KW 43`` bzw. ``KW 43/2026``)."""
+    match = _KW_RE.search(text or "")
+    if not match:
+        return None
+    week = int(match.group(1))
+    year_match = _KW_YEAR_RE.search(text or "")
+    year = int(year_match.group(1)) if year_match else (default_year or datetime.now(TZ).year)
+    if not 1 <= week <= 53:
+        return None
+    try:
+        return date.fromisocalendar(year, week, 1)
+    except ValueError:
+        return None
+
+
+def _text_week_anchor(text: str, default_year: int | None = None) -> date | None:
+    """Montag aus einer Ueberschrift wie ``19.10. - 25.10.2026`` oder ``KW 43``.
+
+    Ein einzelnes Datum im Text gilt bewusst *nicht* als Anker: Kopfzeilen
+    enthalten oft ein Datum der letzten Aktualisierung, das nichts ueber die
+    abgebildete Woche aussagt.
+    """
+    match = _WEEK_RANGE_RE.search(text or "")
+    if match:
+        start = _anchor_date(match.group(1), default_year)
+        end = _anchor_date(match.group(2), default_year)
+        if start is not None and end is not None and 0 <= (end - start).days <= 8:
+            return start - timedelta(days=start.weekday())
+    return _kw_monday(text, default_year)
+
+
+def _page_week_anchor(text: str, default_year: int | None = None) -> date | None:
+    """Wochenanker aus dem Filter-JSON der Seite (``"startDate": "19.10.2026"``).
+
+    Das Portal-JavaScript legt den geladenen Zeitraum als JSON in die Seite;
+    er beschreibt die erste Wochentabelle.
+    """
+    for match in _WEEK_START_RE.finditer(text or ""):
+        found = _anchor_date(match.group(1), default_year)
+        if found is not None:
+            return found - timedelta(days=found.weekday())
+    return None
+
 
 
 def _unescape(value: str) -> str:
@@ -374,15 +452,20 @@ def _detect_header(rows: list[dict]) -> tuple[int, dict[str, int]] | None:
 
 
 def _detect_grid(
-    rows: list[dict], default_year: int | None
+    rows: list[dict],
+    default_year: int | None,
+    anchor: date | None = None,
 ) -> tuple[int, dict[int, date]] | None:
-    """Erkennt ein Wochengitter: Spaltenueberschriften mit Datum je Tag.
+    """Erkennt ein Wochengitter: Tage als Spalten, je Spalte ein Datum.
 
     Die IServ-Stundenplanansicht hat keine Stunde/Zeit-Kopfzeile, sondern
-    Tage als Spalten (``Mo., 19.10.`` oder ``19.10.``). Ohne Datum in der
-    Ueberschrift laesst sich keine Stunde einem Tag zuordnen - dann wird das
-    Gitter bewusst nicht ausgewertet. Reine Datumsspalten werden nur akzeptiert,
-    wenn die erste Kopfzelle eine Stundenspalte ist (``Stunde``/``Std``).
+    Tage als Spalten (``Mo., 19.10.`` oder ``19.10.``). Beschriftet eine
+    Installation die Spalten nur mit Wochentagen (``Montag`` ... ``Freitag``),
+    kommen die Daten aus dem Wochenanker der Seite (Filter-JSON, Zeitraum in
+    der Ueberschrift, ``KW 43``). Ohne Datum *und* ohne Anker laesst sich keine
+    Stunde einem Tag zuordnen - dann wird das Gitter bewusst nicht ausgewertet.
+    Reine Datumsspalten werden nur akzeptiert, wenn die erste Kopfzelle eine
+    Stundenspalte ist (``Stunde``/``Std``).
     """
     best: tuple[int, dict[int, date]] | None = None
     for index, row in enumerate(rows[:4]):
@@ -397,8 +480,20 @@ def _detect_grid(
                 weekday_hits += 1
             columns[position] = day
         if len(columns) < 2:
-            continue
-        if weekday_hits < 1 and not (
+            if anchor is None or columns:
+                # Ohne Anker bleibt das Gitter unbrauchbar; einzelne Datums-
+                # spalten neben Wochentagen sind mehrdeutig.
+                continue
+            seen_days: set[int] = set()
+            for position, cell in enumerate(cells):
+                weekday = weekday_index(cell["text"])
+                if weekday is None or weekday in seen_days:
+                    continue
+                seen_days.add(weekday)
+                columns[position] = anchor + timedelta(days=weekday)
+            if len(columns) < 2:
+                continue
+        elif weekday_hits < 1 and not (
             cells and _match_field(cells[0]["text"]) in ("period", "time")
         ):
             continue
@@ -450,6 +545,16 @@ def _has_weekday_header(rows: list[dict]) -> bool:
         if len(weekdays) >= 2:
             return True
     return False
+
+
+def _row_head(rows: list[dict], limit: int = 6) -> str:
+    """Erste nicht-leere Zellen einer Zeile - fuer Log und Fehlermeldung."""
+    for row in rows[:4]:
+        cells = [normalize_text(cell["text"]) for cell in row["cells"]]
+        cells = [cell for cell in cells if cell]
+        if len(cells) >= 2:
+            return " | ".join(cells[:limit])[:80]
+    return ""
 
 
 def _has_date_columns(rows: list[dict]) -> bool:
@@ -542,6 +647,8 @@ def table_summary(text: str, limit: int = 3) -> str:
     if not collector.tables:
         return "keine Tabelle"
     parts: list[str] = []
+    page_anchor = _page_week_anchor(text)
+    grid_number = 0
     for number, table in enumerate(collector.tables[:limit], start=1):
         rows = table["rows"]
         width = max((len(row["cells"]) for row in rows), default=0)
@@ -565,6 +672,18 @@ def table_summary(text: str, limit: int = 3) -> str:
             description += f", Kopf: {head!r}"
         if weekday_header:
             description += ", Wochengitter " + ("mit Datum" if dated else "ohne Datum")
+            if not dated:
+                # Der Anker der Seite beschreibt nur das erste Gitter - genau wie
+                # beim Auswerten in :func:`parse_html`.
+                anchor = _text_week_anchor(table.get("context", ""))
+                if anchor is None and grid_number == 0:
+                    anchor = page_anchor
+                grid_number += 1
+                description += (
+                    f", Wochenanker {anchor.strftime('%d.%m.%Y')}"
+                    if anchor
+                    else ", kein Wochenanker"
+                )
         elif date_columns:
             description += ", Datumsspalten"
         parts.append(description)
@@ -639,19 +758,32 @@ def parse_html(
     if not dataset.days:
         # Zweiter Versuch: IServ-Stundenplanansicht (Spalten = Wochentage).
         grid_warnings: list[str] = []
+        page_anchor = _page_week_anchor(text, default_year)
+        grid_number = 0
         for table in collector.tables:
             rows = table["rows"]
-            grid = _detect_grid(rows, default_year)
+            # Anker je Tabelle: Zeitraum/KW in der Ueberschrift. Nur das erste
+            # Gitter darf den Anker der Seite (Filter-JSON) uebernehmen - er
+            # beschreibt die zuerst geladene Woche.
+            anchor = _text_week_anchor(table.get("context", ""), default_year)
+            if anchor is None and grid_number == 0:
+                anchor = page_anchor
+            grid = _detect_grid(rows, default_year, anchor)
             if grid is not None:
                 header_index, grid_columns = grid
+                grid_number += 1
                 _parse_grid(rows, header_index, grid_columns, dataset)
                 if dataset.days:
                     break
                 grid_warnings.append("Wochengitter ohne verwertbare Zellen erkannt")
             elif _has_weekday_header(rows):
-                grid_warnings.append(
-                    "Wochengitter ohne Datum in der Spaltenueberschrift ignoriert"
-                )
+                if anchor is None:
+                    grid_warnings.append(
+                        "Wochengitter ohne Datum und ohne Wochenanker ignoriert "
+                        f"({len(rows)} Zeilen, Kopf: {_row_head(rows)!r})"
+                    )
+                else:
+                    grid_warnings.append("Wochengitter ohne verwertbare Zellen erkannt")
             elif _has_date_columns(rows):
                 grid_warnings.append(
                     "Tabelle mit Datumsspalten, aber ohne Stundenspalte ignoriert"
@@ -783,6 +915,11 @@ def parse_json(text: str, source: str = "json") -> PlanDataset:
 # deshalb wird ueber Aliase gesucht statt ueber ein festes Schema.
 PORTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "date": ("date", "datum", "tag", "day", "startdate", "datefrom"),
+    # Wochentag statt Datum. ``dow`` zaehlt bei IServ ab 1 (Montag), ``weekday``
+    # in der DieSchulApp-Schnittstelle ab 0 - beide brauchen den Wochenanker
+    # aus dem Filter (``meta.filter.startDate``).
+    "dow": ("dow",),
+    "weekday": ("weekday", "wochentag", "weekdayindex", "dayofweek", "tagindex"),
     "start": (
         "start",
         "beginn",
@@ -798,6 +935,8 @@ PORTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "subject": (
         "subject",
         "subjects",
+        "substitutionsubject",
+        "subjectsubstitution",
         "fach",
         "faecher",
         "fachname",
@@ -809,6 +948,8 @@ PORTAL_FIELDS: dict[str, tuple[str, ...]] = {
     "room": (
         "room",
         "rooms",
+        "substitutionroom",
+        "roomsubstitution",
         "raum",
         "raeume",
         "raumname",
@@ -838,6 +979,8 @@ PORTAL_FIELDS: dict[str, tuple[str, ...]] = {
         "cancel",
     ),
     "type": ("type", "art", "typ", "kind", "status"),
+    # Vertretung/Ausfall steht in einem eigenen Objekt (``change``).
+    "change": ("change", "changes", "aenderung", "änderung"),
 }
 # Werte sind oft Objekte (``{"name": "Mathematik"}``) statt Strings.
 PORTAL_NAME_KEYS = (
@@ -905,6 +1048,10 @@ def _portal_lookup(node: dict) -> dict[str, object]:
 def _portal_date(value, default_year: int | None = None) -> date | None:
     """Datum aus ``2026-10-19``, ``19.10.2026``, ``19.10.`` oder Zeitstempel."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < 100_000_000:
+            # Kleine Zahlen sind Wochentage oder Stundennummern, keine
+            # Zeitstempel - sonst entstuende ein Datum im Jahr 1970.
+            return None
         seconds = value / 1000 if value > 10_000_000_000 else float(value)
         try:
             return datetime.fromtimestamp(seconds, TZ).date()
@@ -948,44 +1095,153 @@ def _portal_period_key(key) -> int | None:
     return None
 
 
+_PORTAL_DEEP_KEYS: dict[str, tuple[str, ...]] = {
+    "period": ("period", "number", "stunde", "lesson", "slot"),
+    "start": ("starttime", "start", "beginn", "begin", "from"),
+    "end": ("endtime", "end", "ende", "to"),
+}
+
+
+def _portal_deep(node: dict, field: str, depth: int = 2):
+    """Feld auch in Unterobjekten suchen (``timeTableSlot``, ``courseSubject``).
+
+    Die DieSchulApp-Schnittstelle legt Stunde und Uhrzeit in ``timeTableSlot``
+    ab, das Fach in ``courseSubject`` - beides Geschwister des Eintrags.
+    """
+    keys = _PORTAL_DEEP_KEYS.get(field, (field,))
+    # Fach und Raum stehen in eigenen Objekten (``subject: {name: ...}``).
+    allow_objects = field in ("subject", "room")
+    for key, value in node.items():
+        if not isinstance(key, str) or not isinstance(value, (dict, list)):
+            continue
+        if isinstance(value, dict):
+            index = {
+                _portal_key(name): item
+                for name, item in value.items()
+                if isinstance(name, str)
+            }
+            for name in keys:
+                if name in index and (
+                    allow_objects or not isinstance(index[name], (dict, list))
+                ):
+                    return index[name]
+            if depth > 1:
+                nested = _portal_deep(value, field, depth - 1)
+                if nested is not None:
+                    return nested
+        elif depth > 1:
+            for item in value:
+                if isinstance(item, dict):
+                    nested = _portal_deep(item, field, depth - 1)
+                    if nested is not None:
+                        return nested
+    return None
+
+
+def _portal_weekday(found: dict, week_start: date | None) -> date | None:
+    """Datum aus einer Wochentagsangabe - nur mit bekanntem Wochenanker.
+
+    ``weekday`` zaehlt ab 0 (Montag, DieSchulApp), ``dow`` ab 1 (IServ). Eine
+    Zahl in ``date``/``tag`` gilt ebenfalls als Wochentag ab 1 - sie wurde von
+    :func:`_portal_date` als Zeitstempel verworfen.
+    """
+    if week_start is None:
+        return None
+    index: int | None = None
+    text = _portal_value(found.get("weekday"))
+    if text:
+        index = int(text.strip()) if text.strip().isdigit() else weekday_index(text)
+    if index is None:
+        text = _portal_value(found.get("dow")) or _portal_value(found.get("date"))
+        if text.strip().isdigit():
+            index = int(text.strip()) - 1
+        elif text:
+            index = weekday_index(text)
+    if index is None or not 0 <= index <= 6:
+        return None
+    return week_start + timedelta(days=index)
+
+
+def _portal_marks_absent(change: dict) -> bool:
+    """True bei Ausfall: ``change_types`` enthaelt die IServ-Kennung ``"0"``."""
+    fields = _portal_lookup(change)
+    if CANCEL_STRONG_RE.search(_portal_value(fields.get("type"))):
+        return True
+    for key, value in change.items():
+        if not isinstance(key, str) or _portal_key(key) not in ("changetypes", "types"):
+            continue
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            text = _portal_value(item).strip()
+            if text == "0" or CANCEL_STRONG_RE.search(text):
+                return True
+    return False
+
+
 def _portal_lesson(
     node: dict,
     day: date | None,
     default_year: int | None,
     context_period: int | None = None,
+    week_start: date | None = None,
 ) -> Lesson | None:
     """Ein Eintrag als Unterrichtsstunde - oder ``None``, wenn es keine ist."""
+    found = _portal_lookup(node)
+    if day is None:
+        # Wochentag statt Datum (``dow``/``weekday``) - nur mit Wochenanker.
+        day = _portal_weekday(found, week_start)
     if day is None:
         return None
-    found = _portal_lookup(node)
     subject = _portal_value(found.get("subject"))
+    room = _portal_value(found.get("room"))
+    if not subject:
+        # z. B. DieSchulApp: ``courseSubject.subject.name``.
+        subject = _portal_value(_portal_deep(node, "subject"))
+    if not room:
+        room = _portal_value(_portal_deep(node, "room"))
+    note_parts = [_portal_value(found.get("teacher")), _portal_value(found.get("note"))]
+    cancelled = (
+        found.get("cancelled") is True
+        or _portal_value(found.get("cancelled")).lower() in ("true", "1", "ja", "yes")
+        or bool(CANCEL_STRONG_RE.search(_portal_value(found.get("type"))))
+    )
+    # Vertretung/Ausfall steht in einem eigenen Objekt (``change``): dort finden
+    # sich Ersatzfach/-raum und die Kennung fuer Ausfall.
+    change = found.get("change")
+    for entry in change if isinstance(change, list) else [change]:
+        if not isinstance(entry, dict):
+            continue
+        change_fields = _portal_lookup(entry)
+        if _portal_marks_absent(entry):
+            cancelled = True
+        subject = _portal_value(change_fields.get("subject")) or subject
+        room = _portal_value(change_fields.get("room")) or room
+        replaced = _portal_value(change_fields.get("note"))
+        if replaced:
+            note_parts.append(replaced)
     # Fach muss Text enthalten ("1" oder "" ist kein Fach).
     if not re.search(r"[^\W\d_]", subject):
         return None
     period = extract_period(_portal_value(found.get("period")))
     if period is None:
+        # z. B. DieSchulApp: ``timeTableSlot.number`` neben ``courseSubject``.
+        period = extract_period(_portal_value(_portal_deep(node, "period")))
+    if period is None:
         # Gitterform: ``"2026-10-19": {"3": {"fach": ...}}`` - die Stunde steht
         # im Schluessel des Zweigs.
         period = context_period
-    start = _portal_time(found.get("start"))
+    start = _portal_time(found.get("start") or _portal_deep(node, "start"))
     if period is None and start is None:
         return None
-    kind = _portal_value(found.get("type"))
-    note_parts = [_portal_value(found.get("teacher")), _portal_value(found.get("note"))]
     note = ", ".join(part for part in note_parts if part)
-    cancelled_value = found.get("cancelled")
-    cancelled = (
-        cancelled_value is True
-        or _portal_value(cancelled_value).lower() in ("true", "1", "ja", "yes")
-        or bool(CANCEL_STRONG_RE.search(kind))
-        or bool(CANCEL_STRONG_RE.search(note))
-    )
+    if CANCEL_STRONG_RE.search(note):
+        cancelled = True
     return Lesson(
         period=period,
         start=start,
-        end=_portal_time(found.get("end")),
+        end=_portal_time(found.get("end") or _portal_deep(node, "end")),
         subject=subject,
-        room=_portal_value(found.get("room")),
+        room=room,
         cancelled=cancelled,
         note=note,
         date=day,
@@ -1000,6 +1256,7 @@ def _walk_portal(
     seen: set[tuple],
     context_period: int | None = None,
     depth: int = 0,
+    week_start: date | None = None,
 ) -> None:
     """Sucht rekursiv nach Stunden; Datum kann am Eintrag oder am Zweig haengen."""
     if depth > 8:
@@ -1007,13 +1264,20 @@ def _walk_portal(
     if isinstance(node, list):
         for item in node:
             _walk_portal(
-                item, context_day, default_year, lessons, seen, context_period, depth + 1
+                item,
+                context_day,
+                default_year,
+                lessons,
+                seen,
+                context_period,
+                depth + 1,
+                week_start,
             )
         return
     if not isinstance(node, dict):
         return
     own_day = _portal_date(_portal_lookup(node).get("date"), default_year) or context_day
-    lesson = _portal_lesson(node, own_day, default_year, context_period)
+    lesson = _portal_lesson(node, own_day, default_year, context_period, week_start)
     if lesson is not None:
         signature = (
             lesson.date,
@@ -1041,7 +1305,63 @@ def _walk_portal(
             seen,
             child_period if child_period is not None else context_period,
             depth + 1,
+            week_start,
         )
+
+
+def _portal_week_anchor(payload, default_year: int | None = None) -> date | None:
+    """Erster Tag der gelieferten Woche (``meta.filter.startDate`` o. ae.).
+
+    Die Schnittstelle liefert zu Stunden ohne Datum nur den Wochentag
+    (``dow``/``weekday``). Der Filter der Anfrage - und damit der Wochenanfang -
+    steht in der Antwort unter ``meta.filter``.
+    """
+    anchors: list[date] = []
+
+    def walk(node, depth: int = 0) -> None:
+        if depth > 4:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str) and not isinstance(value, (dict, list)):
+                    if _portal_key(key) in (
+                        "startdate",
+                        "weekstart",
+                        "wochenstart",
+                        "monday",
+                    ):
+                        found = _portal_date(value, default_year)
+                        if found is not None:
+                            anchors.append(found - timedelta(days=found.weekday()))
+                else:
+                    walk(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(payload)
+    return anchors[0] if anchors else None
+
+
+def _portal_payload_root(payload):
+    """Wurzel der Stunden - bevorzugt ``data.timetable``.
+
+    Die Antwort enthaelt neben ``data.timetable`` auch ``plain-timetable``
+    (dieselben Stunden ohne Vertretungen) und ``plain-changes`` (nur die
+    Aenderungen). Gelesen wird genau eine Stundenliste, sonst stehen alle
+    Stunden doppelt im Plan.
+    """
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("timetable", "plain-timetable"):
+                value = data.get(key)
+                if isinstance(value, (list, dict)) and value:
+                    return value
+        plain = payload.get("plain-timetable")
+        if isinstance(plain, (list, dict)) and plain:
+            return plain
+    return payload
 
 
 def parse_portal_json(
@@ -1053,6 +1373,11 @@ def parse_portal_json(
     nach Tagen gruppiert, Feldnamen deutsch oder englisch). Erkannt wird eine
     Stunde an ``Datum`` + ``Fach`` + (``Stunde`` oder ``Beginn``) - alles andere
     (Konfiguration, Zeitraster, Rechte) wird ignoriert.
+
+    Stunden ohne Datum tragen oft nur den Wochentag (``dow``/``weekday``); der
+    Wochenanfang kommt aus ``meta.filter.startDate`` der Antwort. ``data``
+    enthaelt neben ``timetable`` auch ``plain-timetable`` - gelesen wird nur
+    eine der beiden Listen, sonst stehen alle Stunden doppelt im Plan.
     """
     dataset = PlanDataset(source=source or "iserv-json")
     lessons: list[Lesson] = []
@@ -1061,7 +1386,15 @@ def parse_portal_json(
     except ValueError as err:
         dataset.warnings.append(f"IServ-JSON nicht lesbar: {err}")
         return dataset
-    _walk_portal(payload, None, default_year, lessons, set())
+    week_start = _portal_week_anchor(payload, default_year)
+    _walk_portal(
+        _portal_payload_root(payload),
+        None,
+        default_year,
+        lessons,
+        set(),
+        week_start=week_start,
+    )
     for lesson in lessons:
         dataset.add_lesson(lesson, is_school_day=True)
     if not dataset.days:

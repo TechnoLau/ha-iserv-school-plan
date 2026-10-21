@@ -245,7 +245,11 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 - **Planabdeckung:** Feiertage außerhalb der Datenabdeckung erkennt das Add-on
   nur über `free_days`.
 - **Abrufe:** Start des Add-ons, danach alle `refresh_minutes`. Nach einem Fehler
-  wird frühestens nach 5 Minuten erneut versucht; nachts (22–5 Uhr) wird nur
+  wird frühestens nach 5 Minuten erneut versucht; bei weiteren Fehlversuchen
+  verdoppelt sich die Wartezeit (10, 20, 40, höchstens 60 Minuten). Lehnt IServ
+  den Filter der JSON-Schnittstelle ab (HTTP 400, „Die erforderliche Eigenschaft
+  classes fehlt.“), gilt sofort das normale Intervall – schnelles Wiederholen
+  ändert daran nichts. Nachts (22–5 Uhr) wird nur
   geladen, wenn die Daten älter als 6 Stunden sind. Der Zustand wird alle
   30 Sekunden neu berechnet (12-Uhr-Regel, Tageswechsel).
 - **Cache:** Zuletzt erfolgreich geladene Daten liegen in `/data/cache.json` und
@@ -261,10 +265,11 @@ Der Template-Trigger wird nur einmal „wahr“, wenn der Zeitpunkt erreicht ist
 | `Zugriff auf den Plan verweigert (HTTP 403)` | Konto darf den Plan nicht sehen, oder die URL ist falsch |
 | `Zugriff auf den Plan verweigert (HTTP 401)` **nach** erfolgreichem Login | Ab Version 1.0.2 behoben: Ursache war `application/json` im `Accept`-Header (IServ wertet das als API-Aufruf). Genau dieser Fehler steckte ab 1.0.9 noch einmal im JSON-Abruf (`timetable/data`) und ist mit **1.0.10** behoben (dort jetzt `Accept: */*`). Meldung nennt URL, `Accept` und Serverantwort – damit lässt sich prüfen, ob der Pfad ein API-/Export-Endpunkt ist, der ein Token braucht |
 | `Plan-Abruf fehlgeschlagen (HTTP 404)` | Einer der Plan-Pfade existiert auf dieser IServ-Instanz nicht (typisch: Tabelle liegt unter `/iserv/timetable`, `/iserv/plan` ist abgeschaltet – oder umgekehrt). Ab 1.0.7 probiert das Add-on alle bekannten Pfade durch und nennt in `last_error` jede versuchte URL mit Status (`[Versuche: …/iserv/plan: HTTP 404; …/iserv/timetable: HTTP 200]`). Stehen dort ausschließlich 404er, ist das Modul für dieses Konto nicht freigeschaltet oder `iserv_url` zeigt auf den falschen Host |
+| `Plan-Abruf fehlgeschlagen (HTTP 400): Die erforderliche Eigenschaft classes fehlt.` | Der Filter der JSON-Schnittstelle war unvollständig: IServ verlangt `classes`, `teachers` und `rooms`, sonst keine Antwort. Ab **1.0.12** werden alle drei immer mitgeschickt (`[]` und, falls das leer bleibt, `["%"]`). Bleibt es bei HTTP 400, nennt `last_error` den vollständigen IServ-Text; dann bitte mit `debug_dump: true` und `log_level: debug` melden |
 | `Plan enthielt keine verwertbaren Daten` | Falsches Format/URL. Zeigt `plan_url` auf die JavaScript-Web-App (`/iserv/timetable`), probiert das Add-on ab 1.0.4 automatisch `/iserv/plan` und nennt im Log die URL, die Daten geliefert hat. Ab 1.0.8 nennt die Meldung die **Tabellenstruktur** (`Tabellen: 1) 14 Zeilen x 6 Spalten, Kopf: 'Stunde \| Montag 19.10. \| …', Wochengitter mit Datum`), nutzt einen auf der Seite verlinkten iCal-Export und ab 1.0.9 die JSON-Schnittstelle der Stundenplanansicht; deren Struktur steht bei Fehlschlag als `[JSON: …]` in der Meldung. „`keine <table>`“ / nur Skript-URLs = JavaScript-Ansicht. Sonst `debug_dump: true` aktivieren und `/data/debug/plan_raw.*` ansehen (per SSH/Samba) |
-| `Wochengitter ohne Datum in der Spaltenueberschrift ignoriert` | Die Seite zeigt die Stundenplan-Woche, aber die Spaltenköpfe enthalten nur Wochentage („Montag“) ohne Datum – ohne Datum ordnet das Add-on keine Stunden zu, statt sie zu raten. Abhilfe: die persönliche iCal-Export-Adresse aus IServ (Stundenplan → Export) als `plan_url` eintragen und `plan_format: ics` setzen, oder in IServ die Ansicht mit Datumsangaben („19.10.“) wählen |
+| `Wochengitter ohne Datum und ohne Wochenanker ignoriert (…)` | Die Seite zeigt die Stundenplan-Woche, aber die Spaltenköpfe enthalten nur Wochentage („Montag“) ohne Datum – und auf der Seite steht kein Anker (Filter-JSON, Zeitraum `19.10. - 25.10.2026`, `KW 43`). Ohne Datum ordnet das Add-on keine Stunden zu, statt sie zu raten; die Klammer nennt Zeilenzahl und Kopfzeile. Ab **1.0.12** werden undatierte Gitter ausgewertet, sobald ein solcher Anker gefunden wird; `table_summary` zeigt dann `Wochenanker 19.10.2026` statt `kein Wochenanker`. Bleibt es bei `kein Wochenanker`: die persönliche iCal-Export-Adresse aus IServ (Stundenplan → Export) als `plan_url` eintragen und `plan_format: ics` setzen, oder `debug_dump: true` und die HTML-Seite mitschicken |
 | `Tabelle ohne erkannte Spaltenueberschrift ignoriert` (2×) | Die Seite enthält Tabellen, aber keine Vertretungsplan-Kopfzeile (`Stunde`/`Zeit`/`Fach`). Seit 1.0.8 wird stattdessen die Wochenansicht (Wochentage als Spalten) ausgewertet; bleibt es bei der Meldung, sagt der Zusatz `Wochengitter …` in derselben Zeile, was gefunden wurde |
-| `Tabellen: 1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'` (Tabellen mit **nur** einer Kopfzeile) | Dann stehen im HTML **keine Unterrichtszeilen** – die neue IServ-Oberfläche lädt sie per JavaScript (`portal.js`) nach, ein HTML-Parser kann sie nicht sehen. Ab **1.0.9** holt das Add-on sie selbst über die JSON-Schnittstelle der Ansicht (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, gleiche Anmeldung, `X-Requested-With: XMLHttpRequest`, **`Accept: */*`** – mit `application/json` antwortet IServ nur „HTTP 401“), seit 1.0.10 mit sichtbarem Grund je Versuch im Feld `[JSON: …]` und seit **1.0.11** Woche für Woche (ein größerer Zeitraum quittiert das Modul mit `HTTP 400 {"status":"error",…"Fehler beim Verarbeiten der Anfrage"}`). Alternativ: die persönliche **iCal-/ICS-Export-Adresse** aus IServ als `plan_url` eintragen und `plan_format: ics` setzen (Stundenplan → „Exportieren“/„iCal“ → Link-Adresse kopieren) |
+| `Tabellen: 1) 1 Zeilen x 6 Spalten, Kopf: 'Std., Montag, …'` (Tabellen mit **nur** einer Kopfzeile) | Dann stehen im HTML **keine Unterrichtszeilen** – die neue IServ-Oberfläche lädt sie per JavaScript (`portal.js`) nach, ein HTML-Parser kann sie nicht sehen. Ab **1.0.9** holt das Add-on sie selbst über die JSON-Schnittstelle der Ansicht (`/iserv/timetable/data?filter={"startDate":"19.10.2026","endDate":"…"}`, gleiche Anmeldung, `X-Requested-With: XMLHttpRequest`, **`Accept: */*`** – mit `application/json` antwortet IServ nur „HTTP 401“), seit 1.0.10 mit sichtbarem Grund je Versuch im Feld `[JSON: …]` und seit **1.0.11** Woche für Woche (ein größerer Zeitraum quittiert das Modul mit `HTTP 400 {"status":"error",…"Fehler beim Verarbeiten der Anfrage"}`). Alternativ: die persönliche **iCal-/ICS-Export-Adresse** aus IServ als `plan_url` eintragen und `plan_format: ics` setzen (Stundenplan → „Exportieren“/„iCal“ → Link-Adresse kopieren). Seit **1.0.12** enthält der Filter zusätzlich `classes`, `teachers` und `rooms`; ohne sie antwortet das Modul mit `HTTP 400 „Die erforderliche Eigenschaft classes fehlt.“` (genau der Fehler aus 1.0.11) |
 | `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ (neue Web-Oberfläche) leitete nach dem Login per Meta-Refresh/JavaScript weiter; ab 1.0.6 führt das Add-on diese Weiterleitung selbst aus. Bleibt die Meldung, `log_level: debug` setzen – dort steht das gefundene Weiterleitungsziel. Hilft das nicht, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
 | `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten ungültig/veraltet. Mosquitto-Add-on neu starten (ab 1.0.3 holt das Add-on die Zugangsdaten selbst neu), sonst eigenes `logins`-Konto im Mosquitto-Add-on anlegen und als `mqtt_username`/`mqtt_password` eintragen. Die Ports in der Network-Karte und `mqtt_discovery_prefix` sind dabei nicht die Ursache |
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen; `mqtt_host`/Zugangsdaten kontrollieren; Add-on-Log ansehen |
@@ -324,13 +329,19 @@ Add-on `/iserv/plan` und `/iserv/timetable`). Die Parser sind tolerant gegenübe
 Spaltennamen („Fach“, „Raum“, „Zeit“, „Art“, „Klasse“, …) und Uhrzeitformaten
 (`07:45 - 08:30`, `7:45`, `745`). Ab Version 1.0.8 wird auch die
 Stundenplan-Wochenansicht gelesen (Spalten = Wochentage mit Datum, Zeilen =
-Stunden, verbundene Zellen für Doppelstunden) sowie – wenn die HTML-Auswertung
-leer bleibt – ein auf der Seite verlinkter iCal-Export. Ab Version 1.0.9 fragt
-das Add-on zusätzlich die JSON-Schnittstelle der Stundenplanansicht ab
-(`/iserv/timetable/data?filter={"startDate":"…","endDate":"…"}` – seit 1.0.11
-Woche für Woche, weil größere Zeiträume mit HTTP 400 abgewiesen werden), weil die
-neue Oberfläche die Zeilen per JavaScript nachlädt; Feldnamen dürfen dabei deutsch
-oder englisch sein. Bei einem unbekannten Format:
+Stunden, verbundene Zellen für Doppelstunden; ab 1.0.12 auch dann, wenn die
+Spalten nur Wochentage nennen und die Seite einen Wochenanker enthält – etwa
+das Filter-JSON, `19.10. - 25.10.2026` oder `KW 43`) sowie – wenn die
+HTML-Auswertung leer bleibt – ein auf der Seite verlinkter iCal-Export. Ab
+Version 1.0.9 fragt das Add-on zusätzlich die JSON-Schnittstelle der
+Stundenplanansicht ab (`/iserv/timetable/data?filter=` mit `startDate`,
+`endDate`, `classes`, `teachers`, `rooms` – seit 1.0.11 Woche für Woche, weil
+größere Zeiträume mit HTTP 400 abgewiesen werden, seit 1.0.12 mit den
+Pflichtfeldern, ohne die das Modul „Die erforderliche Eigenschaft classes
+fehlt.“ meldet), weil die neue Oberfläche die Zeilen per JavaScript nachlädt;
+Feldnamen dürfen dabei deutsch oder englisch sein und Stunden ohne Datum
+(`dow`/`weekday`) bekommen es aus `meta.filter.startDate`. Bei einem unbekannten
+Format:
 
 1. `debug_dump: true` setzen und das Add-on neu starten.
 2. `/data/debug/plan_raw.*` und `plan_raw.meta.json` prüfen; die Fehlermeldung
