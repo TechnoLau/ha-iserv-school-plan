@@ -25,6 +25,7 @@ from app.iserv import (
     _detect_fields,
     _looks_like_login_page,
     _meta_refresh_target,
+    _origin,
 )
 
 LOGIN_PAGE = """
@@ -618,4 +619,154 @@ def test_base_url_with_module_path_is_normalized() -> None:
     options = IservOptions(base_url="https://ebg-kiel.eu/iserv/timetable", plan_url="")
     assert options.login_url == "https://ebg-kiel.eu/iserv/auth/login"
     assert options.resolved_plan_url == "https://ebg-kiel.eu/iserv/plan"
+
+
+
+# --- Fehlender Planpfad (HTTP 404) ------------------------------------------
+
+MISSING_HITS: list[str] = []
+
+
+class MissingPathHandler(BaseHTTPRequestHandler):
+    """IServ, bei dem der klassische Planpfad nicht (mehr) existiert.
+
+    Die eine IServ-Instanz liefert die Plantabelle unter ``/iserv/plan``, die
+    andere unter ``/iserv/timetable``. Fehlt ein Pfad, antwortet IServ mit 404.
+    """
+
+    missing: tuple[str, ...] = ("/iserv/plan",)
+    login_status: int = 200
+
+    def _send(self, status: int, body: str) -> None:
+        payload = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _has_session(self) -> bool:
+        return "session=ok" in (self.headers.get("Cookie") or "")
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server API
+        MISSING_HITS.append(self.path)
+        if self.path.startswith("/iserv/auth/login"):
+            self._send(self.login_status, LOGIN_PAGE if self.login_status == 200 else "not found")
+        elif self.path in self.missing:
+            self._send(404, "not found")
+        elif self.path in ("/iserv/", "/iserv"):
+            self._send(200, "<html><body><h1>Startseite</h1></body></html>")
+        elif self.path == "/iserv/timetable":
+            if not self._has_session():
+                self.send_response(302)
+                self.send_header("Location", "/iserv/auth/login")
+                self.end_headers()
+                return
+            self._send(200, PLAN_PAGE)
+        else:
+            # /iserv/plan und alles andere: Pfad existiert nicht.
+            self._send(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server API
+        length = int(self.headers.get("Content-Length") or 0)
+        data = parse_qs(self.rfile.read(length).decode("utf-8"))
+        valid = (
+            data.get("_username") == ["test"]
+            and data.get("_password") == ["geheim"]
+            and data.get("_csrf") == ["token123"]
+        )
+        if not valid:
+            self._send(200, LOGIN_PAGE)
+            return
+        self.send_response(302)
+        self.send_header("Location", "/iserv/")
+        self.send_header("Set-Cookie", "session=ok; Path=/")
+        self.end_headers()
+
+    def log_message(self, *args) -> None:
+        return
+
+
+@pytest.fixture()
+def missing_path_url():
+    """Startet Testserver mit waehlbaren fehlenden Pfaden (404)."""
+    servers: list[ThreadingHTTPServer] = []
+
+    def start(
+        missing: tuple[str, ...] = ("/iserv/plan",), login_status: int = 200
+    ) -> str:
+        handler = type(
+            "MissingPathHandlerInstance",
+            (MissingPathHandler,),
+            {"missing": missing, "login_status": login_status},
+        )
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        servers.append(httpd)
+        return f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    MISSING_HITS.clear()
+    yield start
+    for httpd in servers:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_missing_plan_path_falls_back_to_next_known_path(missing_path_url) -> None:
+    """Regression: HTTP 404 auf /iserv/plan brach den Abruf komplett ab."""
+    base = missing_path_url()
+    client = IservClient(
+        IservOptions(base_url=base, username="test", password="geheim")
+    )
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/timetable")
+    assert "/iserv/plan" in MISSING_HITS
+    assert "/iserv/timetable" in MISSING_HITS
+
+
+def test_all_missing_plan_paths_report_attempted_urls(missing_path_url) -> None:
+    base = missing_path_url(missing=("/iserv/plan", "/iserv/timetable"))
+    client = IservClient(
+        IservOptions(base_url=base, username="test", password="geheim")
+    )
+    with pytest.raises(FetchError) as error:
+        client.fetch_dataset(default_year=2026)
+    message = str(error.value)
+    assert "HTTP 404" in message
+    assert "/iserv/plan" in message
+    assert "/iserv/timetable" in message
+
+
+def test_ics_format_still_accepts_html_fallback(missing_path_url) -> None:
+    """plan_format ics darf den HTML-Ausweichpfad nicht unlesbar machen."""
+    base = missing_path_url()
+    client = IservClient(
+        IservOptions(
+            base_url=base,
+            plan_url="/iserv/plan",
+            plan_format="ics",
+            username="test",
+            password="geheim",
+        )
+    )
+    dataset = client.fetch_dataset(default_year=2026)
+    assert dataset.days[date(2026, 10, 19)].lessons
+    assert client.last_url.endswith("/iserv/timetable")
+
+
+def test_missing_login_page_reports_url(missing_path_url) -> None:
+    base = missing_path_url(login_status=404)
+    client = IservClient(IservOptions(base_url=base, username="test", password="geheim"))
+    with pytest.raises(IservError) as error:
+        client.login()
+    message = str(error.value)
+    assert "HTTP 404" in message
+    assert "/iserv/auth/login" in message
+
+
+def test_origin_header_uses_scheme_and_host() -> None:
+    assert _origin("https://schule.de/iserv") == "https://schule.de"
+    assert _origin("https://schule.de/iserv/timetable") == "https://schule.de"
+    assert _origin("http://127.0.0.1:8080/iserv") == "http://127.0.0.1:8080"
 

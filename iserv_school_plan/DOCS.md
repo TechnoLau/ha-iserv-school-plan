@@ -51,6 +51,13 @@ Repositories.
 ## Fehlersuche
 
 - Add-on-Log prüfen (`log_level: debug` für mehr Details).
+- Bei „Plan-Abruf fehlgeschlagen (HTTP 404)“: Der Pfad existiert auf dieser
+  IServ-Instanz nicht (z. B. `/iserv/plan` abgeschaltet, Tabelle liegt unter
+  `/iserv/timetable`). Ab Version 1.0.7 probiert das Add-on alle bekannten Pfade
+  und listet in `last_error` jede versuchte URL mit HTTP-Status auf. Stehen dort
+  nur 404er, fehlt die Freischaltung des Moduls für das Konto oder `iserv_url`
+  zeigt auf den falschen Host; `iserv_url` bleibt dabei die Basisadresse
+  (`https://schule.de`), `plan_url` bleibt leer.
 - Bei „Plan enthielt keine verwertbaren Daten“: `debug_dump: true` setzen, Add-on
   neu starten und `/data/debug/plan_raw.*` prüfen. Meldet das Add-on „keine
   HTML-Tabelle in der Antwort“, zeigt `plan_url` auf die JavaScript-Web-App von

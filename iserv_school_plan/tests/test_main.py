@@ -199,6 +199,35 @@ def test_failed_refresh_dumps_raw_response(tmp_path, monkeypatch) -> None:
     assert meta["content_type"] == "text/html"
 
 
+def test_failed_refresh_keeps_last_dataset() -> None:
+    """Ein Abruffehler darf keine Stunden als ausgefallen melden."""
+    addon = make_addon()
+    now = datetime(2026, 10, 20, 7, 0, tzinfo=TZ)
+    dataset = make_dataset(now)
+    addon.dataset = dataset
+
+    class FailingClient:
+        last_raw = ""
+        last_content_type = ""
+        last_url = ""
+
+        def fetch_dataset(self, default_year=None):  # noqa: ARG002 - Testdouble
+            raise FetchError("Plan-Abruf fehlgeschlagen (HTTP 404)")
+
+        def invalidate_session(self) -> None:
+            return None
+
+    addon.client = FailingClient()
+    addon.refresh(now)
+
+    # Letzter guter Stand bleibt erhalten - nichts wird als "faellt aus" markiert.
+    assert addon.dataset is dataset
+    state = addon.build_state(now)
+    assert state["status"] == "ok"
+    assert state["start"] == "2026-10-20T09:50:00+02:00"
+    assert "404" in (state["last_error"] or "")
+
+
 def test_invalid_options_are_reported_but_addon_keeps_running() -> None:
     addon = Addon(AddonOptions())
     problems = addon.options.validate()

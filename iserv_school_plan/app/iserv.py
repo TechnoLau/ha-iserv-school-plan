@@ -17,7 +17,7 @@ from html import unescape
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlsplit
 from urllib.request import (
     HTTPCookieProcessor,
     HTTPSHandler,
@@ -38,6 +38,11 @@ USER_AGENT = (
 # Die weiteren werden probiert, falls der erste keine Tabelle liefert (z. B.
 # weil ``plan_url`` auf die JavaScript-Web-App zeigt).
 PLAN_PATHS = ("/iserv/plan", "/iserv/timetable")
+# HTTP-Status, mit denen IServ antwortet, wenn ein Modulpfad auf dieser
+# Installation nicht (mehr) existiert. Solche Antworten duerfen den Abruf nicht
+# beenden - der naechste bekannte Plan-Pfad wird probiert (z. B. liefert die
+# eine Schule die Tabelle unter /iserv/plan, die andere unter /iserv/timetable).
+PLAN_PATH_MISSING_CODES = (404, 405, 410)
 # Erkennungsmerkmale der IServ-Anmeldeseite (klassische Seite und neue Web-App).
 # Bewusst nur sehr spezifische Marker, damit normale Seiten nicht als Login gelten.
 LOGIN_PAGE_MARKERS = ('id="login-form"', 'id="password_login"')
@@ -90,6 +95,19 @@ def _iserv_url(base_url: str, path: str) -> str:
     if base.lower().endswith("/iserv"):
         return f"{base}/{clean}"
     return f"{base}/iserv/{clean}"
+
+
+def _origin(url: str) -> str:
+    """Schema + Host einer URL (ohne Pfad) - Wert fuer den ``Origin``-Header.
+
+    Der Header muss nach RFC 6454 nur Schema, Host und Port enthalten. Die
+    fruehere Variante schickte den kompletten Pfad (``.../iserv``) mit, was
+    IServ bei der CSRF-Pruefung des Login-Formulars ablehnen kann.
+    """
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return (url or "").rstrip("/")
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def _looks_like_login_page(url: str, body: str) -> bool:
@@ -380,6 +398,9 @@ class IservClient:
             handlers.append(HTTPSHandler(context=context))
         self._opener = build_opener(*handlers)
         self._logged_in = False
+        # Pfade, die in diesem Durchlauf tatsaechlich geantwortet haben - damit
+        # der Ausweich-Pfad sie nicht doppelt abfragt.
+        self._tried_urls: set[str] = set()
 
     def _request(
         self,
@@ -423,8 +444,14 @@ class IservClient:
                 raise IservError(
                     f"{hint} - Login gerade nicht moeglich, bitte spaeter erneut versuchen"
                 ) from err
+            if err.code == 404:
+                raise IservError(
+                    "Loginseite nicht gefunden (HTTP 404) - iserv_url pruefen "
+                    f"(aufgerufen: {self.options.login_url})"
+                ) from err
             raise IservError(
-                f"Loginseite nicht erreichbar (HTTP {err.code}) - iserv_url pruefen"
+                f"Loginseite nicht erreichbar (HTTP {err.code}) - iserv_url pruefen "
+                f"(aufgerufen: {self.options.login_url})"
             ) from err
         except URLError as err:
             raise IservError(f"IServ nicht erreichbar: {err.reason}") from err
@@ -451,14 +478,21 @@ class IservClient:
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Referer": page_url,
-                    "Origin": self.options.base_url.rstrip("/"),
+                    "Origin": _origin(self.options.base_url),
                 },
             ) as response:
                 body = self._read(response)
                 final_url = response.geturl()
         except HTTPError as err:
+            if err.code == 404:
+                raise AuthError(
+                    "Login-POST lief ins Leere (HTTP 404) - IServ hat die "
+                    f"Anmeldeadresse nicht angenommen ({action}). iserv_url ohne "
+                    "Modulpfad eintragen, z. B. https://schule.de"
+                ) from err
             raise AuthError(
-                f"Login fehlgeschlagen (HTTP {err.code}) - Benutzername/Passwort pruefen"
+                f"Login fehlgeschlagen (HTTP {err.code}) - Benutzername/Passwort pruefen "
+                f"(Anmeldeadresse: {action})"
             ) from err
         except URLError as err:
             raise IservError(f"Login-Request fehlgeschlagen: {err.reason}") from err
@@ -595,56 +629,126 @@ class IservClient:
             f"(URL: {url}, Accept: {accept}){suffix}"
         )
 
+    def _plan_urls(self) -> list[str]:
+        """Konfigurierte Plan-URL plus alle bekannten Ausweich-Pfade."""
+        urls: list[str] = []
+        seen: set[str] = set()
+        for url in [self.options.resolved_plan_url, *self._fallback_plan_urls()]:
+            key = url.rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(url)
+        return urls
+
+    @staticmethod
+    def _attempt_suffix(problems: list[str]) -> str:
+        """Nennt die bereits versuchten URLs samt HTTP-Status.
+
+        Ohne diese Angabe stand im Log nur ``HTTP 404`` - damit war nicht
+        erkennbar, welcher Pfad fehlt (``/iserv/plan`` oder ``/iserv/timetable``).
+        """
+        return f" [Versuche: {'; '.join(problems)}]" if problems else ""
+
     def fetch_plan_text(self) -> tuple[str, str]:
+        """Holt die Plantabelle und probiert dabei alle bekannten Plan-Pfade.
+
+        IServ-Instanzen unterscheiden sich: Die servergerenderte Tabelle liegt
+        je nach Installation unter ``/iserv/plan`` (Vertretungsplan) oder unter
+        ``/iserv/timetable`` (Stundenplan/"veraltete" Ansicht). Antwortet ein
+        Pfad mit 404/405/410, existiert das Modul dort nicht - dann wird der
+        naechste bekannte Pfad probiert, statt den kompletten Abruf abzubrechen.
+        """
         self._ensure_login()
 
-        url = self.options.resolved_plan_url
         if not self.options.plan_url:
-            _LOGGER.debug("plan_url nicht gesetzt - Standardpfad %s wird verwendet", url)
-        accept = _accept_for(url, self.options.plan_format)
-        # Manche IServ-Instanzen liefern fuer Kalender-/JSON-Pfade HTML aus -
-        # deshalb bei 401/403 einmal mit Browser-Accept nachfassen.
-        candidates = [accept] if accept == ACCEPT_HTML else [accept, ACCEPT_HTML]
-        _LOGGER.debug("Plan-Abruf: %s (Accept: %s)", url, accept)
+            _LOGGER.debug(
+                "plan_url nicht gesetzt - Standardpfad %s wird verwendet",
+                self.options.resolved_plan_url,
+            )
 
-        text = content_type = final_url = ""
         self._format_override = None
-        for index, candidate in enumerate(candidates):
-            try:
-                text, content_type, final_url = self._plan_request(url, candidate)
-                if candidate != accept:
+        self._tried_urls = set()
+        problems: list[str] = []
+        urls = self._plan_urls()
+
+        for position, url in enumerate(urls):
+            # Ausweich-Pfade werden immer im Auto-Format gelesen: Ein fuer die
+            # eigene plan_url gewaehltes Format (z. B. ics) gilt dort nicht.
+            primary = position == 0
+            url_format = self.options.plan_format if primary else "auto"
+            accept = _accept_for(url, url_format)
+            # Manche IServ-Instanzen liefern fuer Kalender-/JSON-Pfade HTML aus -
+            # deshalb bei 401/403 einmal mit Browser-Accept nachfassen.
+            candidates = [accept] if accept == ACCEPT_HTML else [accept, ACCEPT_HTML]
+            _LOGGER.debug("Plan-Abruf: %s (Accept: %s)", url, accept)
+
+            for index, candidate in enumerate(candidates):
+                try:
+                    text, content_type, final_url = self._plan_request(url, candidate)
+                except HTTPError as err:
+                    if err.code in (401, 403):
+                        if index < len(candidates) - 1:
+                            _LOGGER.warning(
+                                "Plan-Abruf mit Accept '%s' abgelehnt (HTTP %s) - "
+                                "neuer Versuch mit Browser-Accept",
+                                candidate,
+                                err.code,
+                            )
+                            continue
+                        raise self._plan_error(err, url, candidate) from err
+                    # Erst hier den Body lesen: _server_hint() verbraucht ihn,
+                    # _plan_error() braucht ihn fuer die Fehlermeldung.
+                    hint = _server_hint(err)
+                    if hint:
+                        raise FetchError(
+                            f"Plan-Abruf fehlgeschlagen (HTTP {err.code}) - {hint}"
+                        ) from err
+                    problems.append(f"{url}: HTTP {err.code}")
+                    if err.code in PLAN_PATH_MISSING_CODES or position < len(urls) - 1:
+                        _LOGGER.warning(
+                            "%s ist auf dieser IServ-Instanz nicht abrufbar "
+                            "(HTTP %s) - naechster bekannter Plan-Pfad wird probiert",
+                            url,
+                            err.code,
+                        )
+                        break
+                    raise FetchError(
+                        f"Plan-Abruf fehlgeschlagen (HTTP {err.code}) fuer {url}"
+                        + self._attempt_suffix(problems)
+                    ) from err
+                except URLError as err:
+                    raise FetchError(f"Plan-Abruf fehlgeschlagen: {err.reason}") from err
+
+                self._tried_urls.add(url)
+                if not primary:
+                    _LOGGER.info(
+                        "Plantabelle von Ausweich-Pfad %s (Format wird automatisch erkannt)",
+                        url,
+                    )
+                    self._format_override = "auto"
+                elif candidate != accept:
                     _LOGGER.info(
                         "Plan wurde als HTML statt als %s ausgeliefert - Format wird automatisch erkannt",
                         self.options.plan_format,
                     )
                     self._format_override = "auto"
-                break
-            except HTTPError as err:
-                if err.code not in (401, 403):
-                    hint = _server_hint(err)
-                    details = f" - {hint}" if hint else ""
-                    raise FetchError(
-                        f"Plan-Abruf fehlgeschlagen (HTTP {err.code}){details}"
-                    ) from err
-                if index < len(candidates) - 1:
-                    _LOGGER.warning(
-                        "Plan-Abruf mit Accept '%s' abgelehnt (HTTP %s) - neuer Versuch mit Browser-Accept",
-                        candidate,
-                        err.code,
+
+                self.last_raw = text
+                self.last_content_type = content_type
+                self.last_url = final_url
+
+                if _looks_like_login_page(final_url, text):
+                    raise AuthError(
+                        "Sitzung abgelaufen - IServ leitet auf die Anmeldeseite um"
                     )
-                    continue
-                raise self._plan_error(err, url, candidate) from err
-            except URLError as err:
-                raise FetchError(f"Plan-Abruf fehlgeschlagen: {err.reason}") from err
 
-        self.last_raw = text
-        self.last_content_type = content_type
-        self.last_url = final_url
+                return text, content_type
 
-        if _looks_like_login_page(final_url, text):
-            raise AuthError("Sitzung abgelaufen - IServ leitet auf die Anmeldeseite um")
-
-        return text, content_type
+        raise FetchError(
+            "Plan-Abruf fehlgeschlagen - keiner der bekannten Plan-Pfade war abrufbar"
+            + self._attempt_suffix(problems)
+        )
 
     def _fallback_plan_urls(self) -> list[str]:
         """Alle bekannten Plan-Pfade ausser dem bereits versuchten."""
@@ -681,6 +785,9 @@ class IservClient:
         ``/iserv/plan`` - das wird hier einmalig getestet.
         """
         for url in self._fallback_plan_urls():
+            if url in self._tried_urls:
+                _LOGGER.debug("Ausweich-Pfad %s wurde bereits versucht", url)
+                continue
             try:
                 text, content_type, final_url = self._plan_request(url, ACCEPT_HTML)
             except (HTTPError, URLError, IservError) as err:
@@ -717,8 +824,9 @@ class IservClient:
             return fallback
 
         warnings = "; ".join(dataset.warnings) or "unbekanntes Format"
+        checked = ", ".join(sorted(self._tried_urls)) or self.options.resolved_plan_url
         raise FetchError(
             "Plan enthielt keine verwertbaren Daten: "
-            f"{warnings} [Antwort: {_html_summary(self.last_raw)}]"
+            f"{warnings} [geprueft: {checked}] [Antwort: {_html_summary(self.last_raw)}]"
         )
 

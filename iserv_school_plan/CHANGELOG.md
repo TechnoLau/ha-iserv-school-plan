@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.7
+
+- Fix fuer `Plan-Abruf fehlgeschlagen (HTTP 404)`: Antwortet der erste Plan-Pfad
+  mit HTTP 404/405/410 (Modul auf dieser IServ-Instanz nicht vorhanden), probiert
+  das Add-on jetzt den naechsten bekannten Pfad (`/iserv/plan` bzw.
+  `/iserv/timetable`), statt den Abruf abzubrechen. Bisher wurde der Ausweich-Pfad
+  nur nach einer 200-Antwort ohne Tabelle versucht - eine 404 beendete alles
+- Fehlermeldungen nennen die tatsaechlich aufgerufene URL samt HTTP-Status
+  (`[Versuche: https://.../iserv/plan: HTTP 404; ...]`); bei Login-Fehlern steht
+  die Anmeldeadresse dabei. `Plan-Abruf fehlgeschlagen (HTTP 404)` allein liess
+  nicht erkennen, welcher Pfad fehlt. "Plan enthielt keine verwertbaren Daten"
+  listet jetzt zusaetzlich die geprueften URLs
+- `Origin`-Header beim Login enthaelt nur noch Schema und Host (vorher inklusive
+  `/iserv`-Pfad) - IServ wertet ihn als CSRF-Schutz aus
+- `iserv_url`/`plan_url` unveraendert: eine `iserv_url` mit Modulpfad wird
+  weiterhin auf `https://schule.de/iserv` gekuerzt
+- Ein Abruffehler ueberschreibt keine vorhandenen Daten: der letzte gute Stand
+  bleibt erhalten und es wird nichts faelschlich als "faellt aus" gemeldet
+  (jetzt durch einen Test abgesichert)
+
 ## 1.0.6
 
 - Fix für IServ mit neuer Web-Oberfläche (OIDC): Nach dem Login antwortet IServ
