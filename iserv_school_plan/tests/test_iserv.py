@@ -1235,8 +1235,25 @@ def test_portal_json_filter_has_required_properties() -> None:
     assert wildcard["rooms"] == ["%"]
 
 
-def test_portal_json_sends_required_filter_to_server(portal_url: str) -> None:
-    """Der Testserver prueft den Filter wie IServ - ohne ``classes``: HTTP 400."""
+def test_portal_json_sends_required_filter_to_server(
+    portal_url: str, monkeypatch
+) -> None:
+    """Der Testserver prueft den Filter wie IServ - ohne ``classes``: HTTP 400.
+
+    Die erste Wochenabfrage beginnt einen Tag vor heute (``PORTAL_DAYS_BACK``)
+    und damit am Montag der Vorwoche, wenn heute Montag ist. Damit die
+    Erwartung an ``startDate``/``endDate`` nicht davon abhaengt, wann der Test
+    laeuft, wird die Uhr auf Mittwoch, 21.10.2026, festgelegt - vorher war der
+    Test nur in der Woche 19.10.-25.10.2026 gruen.
+    """
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: D102 - Testdouble
+            moment = datetime(2026, 10, 21, 8, 0, tzinfo=iserv_module.TZ)
+            return moment.astimezone(tz) if tz else moment
+
+    monkeypatch.setattr(iserv_module, "datetime", FixedDatetime)
     client = IservClient(IservOptions(base_url=portal_url, username="test", password="geheim"))
     dataset = client.fetch_dataset(default_year=2026)
     assert dataset.days
