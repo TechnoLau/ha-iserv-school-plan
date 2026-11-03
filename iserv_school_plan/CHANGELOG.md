@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.2.0
+
+**Neue Sensoren "Schul start" und "Schul ende" - bitte Automatisierungen anpassen.**
+
+- `sensor.naechster_schultag` ist ersetzt durch zwei Sensoren:
+  - `sensor.schul_start` - Beginn des Schultags im 24-Stunden-Format (`08:10`);
+    Attribut `date` nennt den Tag.
+  - `sensor.schul_ende` - Ende der letzten **stattfindenden** Stunde (`13:20`);
+    entfallene Stunden am Tagesende schieben das Ende nach vorne. Attribute
+    `date`, `period`, `reason`.
+- Tageswechsel um Mitternacht: Beide Sensoren zeigen immer den laufenden Tag.
+  Ist heute kein Schultag (Wochenende, Ferien, keine Stunden), gilt der
+  naechste - genau wie beim Wecker.
+- Ohne Plandaten (keine Verbindung, kein Cache) melden beide Sensoren die
+  Standardzeiten `08:10` und `13:20` statt `unknown` - Automationen laufen
+  weiter. Attribut `source` unterscheidet `plan` und `fallback`.
+- `sensor.stundenplan_status` springt nicht mehr bei einem einzelnen
+  fehlgeschlagenen Abruf auf `verbindung fehlgeschlagen`: Die vorhandenen
+  Plandaten bleiben gueltig, der Fehler steht weiter in `last_error`. Erst
+  nach zwei Fehlversuchen in Folge oder wenn die Daten aelter als zwoelf
+  Stunden sind, meldet der Sensor den Ausfall.
+
+## 1.1.1
 ## 1.1.1
 
 - `sensor.naechster_schultag` liefert jetzt die **Uhrzeit der ersten Stunde im

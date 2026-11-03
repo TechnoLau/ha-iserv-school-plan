@@ -3,10 +3,11 @@
 [![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FTechnoLau%2Fha-iserv-school-plan)
 [![Tests](https://github.com/TechnoLau/ha-iserv-school-plan/actions/workflows/ci.yml/badge.svg)](https://github.com/TechnoLau/ha-iserv-school-plan/actions/workflows/ci.yml)
 
-Liest den IServ-Stundenplan ein und stellt die **erste tatsächlich stattfindende
-Unterrichtsstunde** sowie einen **„Wecker morgen“** als Home-Assistant-Entities
-bereit – gedacht als Grundlage für einen Schulwecker (z. B. Wecker 45 Minuten vor
-Stundenbeginn, nur an Schultagen).
+Liest den IServ-Stundenplan ein und stellt **Schul start** und **Schul ende**
+(letzte stattfindende Stunde, Ausfälle berücksichtigt), die **erste tatsächlich
+stattfindende Unterrichtsstunde** sowie einen **„Wecker morgen“** als
+Home-Assistant-Entities bereit – gedacht als Grundlage für einen Schulwecker
+(z. B. Wecker 45 Minuten vor Stundenbeginn, nur an Schultagen).
 
 Die Entities werden per **MQTT Discovery** angelegt; es sind keine manuellen
 YAML-Einträge in Home Assistant nötig. MQTT-Broker, Port, TLS und Zugangsdaten
@@ -134,9 +135,10 @@ Alle Entities hängen am Gerät „IServ Stundenplan“.
 
 | Entity | Typ | Bedeutung |
 | --- | --- | --- |
-| `sensor.stundenplan_status` | Sensor | `verbinden` (Start/keine Daten), `verbunden` oder `verbindung fehlgeschlagen` |
+| `sensor.stundenplan_status` | Sensor | `verbinden` (Start/keine Daten), `verbunden` oder `verbindung fehlgeschlagen`. Ein einzelner fehlgeschlagener Abruf schaltet nicht um – erst zwei Fehlversuche in Folge oder Daten, die älter als zwölf Stunden sind |
 | `sensor.erste_unterrichtsstunde` | Sensor | Stundennummer der ersten stattfindenden Stunde; `unknown`, wenn keine berechnet werden kann |
-| `sensor.naechster_schultag` | Sensor | Uhrzeit der ersten Stunde am nächsten Schultag im 24-Stunden-Format (`07:45`); `unknown`, wenn keine Stunde bekannt ist. Das Datum steht im Attribut `date` |
+| `sensor.schul_start` | Sensor | Beginn des Schultags im 24-Stunden-Format (`08:10`); das Datum steht im Attribut `date`. Gilt für den laufenden Tag, um Mitternacht springt er um; ist heute kein Schultag, gilt der nächste |
+| `sensor.schul_ende` | Sensor | Ende der letzten stattfindenden Stunde (`13:20`) – entfallene Stunden am Tagesende verschieben das Ende nach vorne. Gilt für denselben Tag wie `schul_start` |
 | `binary_sensor.wecker_morgen` | Binary Sensor | `on` nur, wenn **morgen** ein Schultag mit stattfindender Stunde ist (Sa/So immer `off`) |
 
 Die Entity-IDs sind Vorschläge von MQTT Discovery: Sie gelten beim ersten
@@ -149,9 +151,10 @@ Zusatzinformationen als Attribute:
 - **Erste Unterrichtsstunde:** `start` (`07:45`), `start_iso` (ISO 8601 mit
   Zeitzone), `hours_until` (ganze Stunden ab jetzt), `target_date`, `subject`,
   `room`, `planned_first_period`, `cancelled_periods`
-- **Nächster Schultag:** `date` (ISO-Datum), `start`, `start_iso`,
-  `hours_until`, `period`, `subject`, `room`, `planned_first_period`, `reason`,
-  `status`, `cancelled_periods`
+- **Schul start:** `date` (ISO-Datum), `start`, `start_iso`, `period`,
+  `source` (`plan` oder `fallback`), `plan_status`
+- **Schul ende:** `date` (ISO-Datum), `end`, `end_iso`, `period`, `source`,
+  `reason` (z. B. `Wochenende`, `Herbstferien`), `plan_status`
 - **Wecker morgen:** `date`, `start`, `period`, `subject`, `room`, `reason`
   (z. B. `Wochenende`, `Herbstferien`, `keine Daten`) und `plan_status`
 - **Status:** `reason`, `plan_status` (`ok`, `ferien`, `kein_unterricht`,
@@ -270,9 +273,10 @@ automation:
 | HTML enthält nur eine Kopfzeile, keine Unterrichtszeilen | Die neue IServ-Oberfläche lädt die Zeilen per JavaScript nach. Das Add-on fragt deshalb zusätzlich die JSON-Schnittstelle ab (`/iserv/timetable/data?filter=…` mit `startDate`, `endDate`, `classes`, `teachers`, `rooms`) und wertet einen verlinkten iCal-Export aus |
 | `Login erfolgreich, aber die IServ-Sitzung wurde nicht übernommen` | IServ leitete per Meta-Refresh/JavaScript weiter; das Add-on führt diese Weiterleitung selbst aus. Bleibt die Meldung, ist meist eine **2FA-Pflicht** oder ein Sonderlogin der Schule die Ursache |
 | `MQTT-Verbindung abgelehnt: Not authorized` | Broker-Zugangsdaten veraltet: Mosquitto-Add-on neu starten (schreibt Benutzer/Passwort neu); das Add-on fragt sie zusätzlich selbst erneut ab |
-| Entities erscheinen nicht | MQTT-Integration und Broker prüfen, Add-on-Log ansehen. Nach dem Update auf 1.1.0 sind `sensor.stundenbeginn` und `binary_sensor.schulwecker_aktiv` bewusst entfernt – Automatisierungen auf `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen` umstellen |
+| Entities erscheinen nicht | MQTT-Integration und Broker prüfen, Add-on-Log ansehen. Nach dem Update auf 1.1.0 sind `sensor.stundenbeginn` und `binary_sensor.schulwecker_aktiv` bewusst entfernt – Automatisierungen auf `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen` umstellen. Mit 1.2.0 ist `sensor.naechster_schultag` durch `sensor.schul_start` und `sensor.schul_ende` ersetzt |
 | Ferien fehlen oder sind falsch | `bundesland` prüfen; `warnings`/`holidays_updated` im Status-Attribut kontrollieren. Ohne Internet gelten die gespeicherten Daten (max. sieben Tage alt) |
 | Wecker bleibt aus, obwohl Unterricht ist | `sensor.erste_unterrichtsstunde` (Attribute `start`, `target_date`) und `sensor.stundenplan_status` prüfen; ggf. Startzeiten über `period_times` ergänzen |
+| `sensor.schul_start`/`sensor.schul_ende` zeigen `08:10`/`13:20` | Es liegen keine Plandaten vor (keine Verbindung, kein Cache) – das Add-on fällt bewusst auf die Standardzeiten zurück. Attribut `source` steht dann auf `fallback`; `last_error` im Status nennt den Grund |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | Das Schul-Zertifikat ist im Container nicht vertrauenswürdig. Die Prüfung ist immer aktiv; die Schule muss ein gültiges Zertifikat (z. B. Let's Encrypt) ausliefern |
 
 Log des Add-ons: **Einstellungen → Add-ons → IServ Stundenplan → Log**. Für mehr

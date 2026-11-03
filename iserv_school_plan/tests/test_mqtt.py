@@ -24,7 +24,8 @@ def test_discovery_topics_and_payloads() -> None:
     assert set(topics) == {
         "homeassistant/sensor/iserv_status/config",
         "homeassistant/sensor/iserv_erste_stunde/config",
-        "homeassistant/sensor/iserv_naechster_schultag/config",
+        "homeassistant/sensor/iserv_schul_start/config",
+        "homeassistant/sensor/iserv_schul_ende/config",
         "homeassistant/binary_sensor/iserv_wecker_morgen/config",
     }
 
@@ -39,12 +40,19 @@ def test_discovery_topics_and_payloads() -> None:
     assert "value_json.period" in first["value_template"]
     assert "hours_until" in first["json_attributes_template"]
 
-    day = topics["homeassistant/sensor/iserv_naechster_schultag/config"]
-    # Der Zustand ist die Uhrzeit (24h, z. B. 07:45); ein Datum waere mit
+    start = topics["homeassistant/sensor/iserv_schul_start/config"]
+    # Der Zustand ist die Uhrzeit (24h, z. B. 08:10); ein Datum waere mit
     # device_class "date" erwartet worden und ist deshalb entfernt.
-    assert "device_class" not in day
-    assert "value_json.start" in day["value_template"]
-    assert "value_json.target_date" in day["json_attributes_template"]
+    assert "device_class" not in start
+    assert start["name"] == "Schul start"
+    assert "value_json.schul_start" in start["value_template"]
+    assert "schul_start_date" in start["json_attributes_template"]
+
+    end = topics["homeassistant/sensor/iserv_schul_ende/config"]
+    assert end["name"] == "Schul ende"
+    assert "device_class" not in end
+    assert "value_json.schul_ende" in end["value_template"]
+    assert "schul_ende_period" in end["json_attributes_template"]
 
     morning = topics["homeassistant/binary_sensor/iserv_wecker_morgen/config"]
     assert morning["payload_on"] == "ON"
@@ -61,7 +69,8 @@ def test_discovery_entity_ids_match_documented_entity_ids() -> None:
     expected = {
         "homeassistant/sensor/iserv_status/config": "sensor.stundenplan_status",
         "homeassistant/sensor/iserv_erste_stunde/config": "sensor.erste_unterrichtsstunde",
-        "homeassistant/sensor/iserv_naechster_schultag/config": "sensor.naechster_schultag",
+        "homeassistant/sensor/iserv_schul_start/config": "sensor.schul_start",
+        "homeassistant/sensor/iserv_schul_ende/config": "sensor.schul_ende",
         "homeassistant/binary_sensor/iserv_wecker_morgen/config": "binary_sensor.wecker_morgen",
     }
     for topic, entity_id in expected.items():
@@ -80,6 +89,8 @@ def test_removed_entities_are_deleted_with_empty_payload() -> None:
     assert topics == [
         "homeassistant/sensor/iserv_stundenbeginn/config",
         "homeassistant/binary_sensor/iserv_schulwecker/config",
+        # 1.2.0: ersetzt durch sensor.schul_start / sensor.schul_ende
+        "homeassistant/sensor/iserv_naechster_schultag/config",
     ]
 
     publisher = MqttPublisher(AddonOptions(), "1.1.1")

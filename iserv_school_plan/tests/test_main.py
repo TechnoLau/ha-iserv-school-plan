@@ -240,16 +240,77 @@ def test_discovery_templates_use_existing_state_keys() -> None:
             assert key in state, f"{topic}: value_json.{key} fehlt im Status"
 
 
-def test_connection_state_reports_progress() -> None:
+def test_connection_state_tolerates_single_failed_fetch() -> None:
+    """Ein einzelner Aussetzer schaltet den Status nicht auf "fehlgeschlagen".
+
+    Vor 1.2.0 wurde ``last_error`` sofort gemeldet - ein kurzer Netzaussetzer
+    liess den Sensor fuer die naechsten Minuten rot werden, obwohl die
+    Plandaten unveraendert gueltig waren.
+    """
     now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
     addon = make_addon()
-    assert addon.connection_state() == "verbinden"
+    assert addon.connection_state(now) == "verbinden"
 
     addon.dataset = make_dataset(now)
-    assert addon.connection_state() == "verbunden"
+    assert addon.connection_state(now) == "verbunden"
 
     addon.last_error = "Login fehlgeschlagen"
-    assert addon.connection_state() == "verbindung fehlgeschlagen"
+    addon.failure_count = 1
+    assert addon.connection_state(now) == "verbunden"
+    # Der Fehler bleibt sichtbar - nur eben im Attribut, nicht als Zustand.
+    state = addon.build_state(now)
+    assert state["last_error"] == "Login fehlgeschlagen"
+
+    addon.failure_count = 2
+    assert addon.connection_state(now) == "verbindung fehlgeschlagen"
+
+
+def test_connection_state_fails_without_data_or_with_stale_data() -> None:
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.last_error = "Login fehlgeschlagen"
+    assert addon.connection_state(now) == "verbindung fehlgeschlagen"
+
+    addon = make_addon()
+    addon.dataset = make_dataset(now - timedelta(hours=13))
+    assert addon.connection_state(now) == "verbindung fehlgeschlagen"
+
+
+def test_build_state_exposes_schul_start_und_ende() -> None:
+    """Beide Sensoren zeigen den laufenden Tag - um Mitternacht springen sie um."""
+    monday = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(monday)
+    state = addon.build_state(monday)
+    # Montag: Stunde 1 findet statt, Stunde 2 ist Ausfall.
+    assert state["schul_start"] == "07:45"
+    assert state["schul_ende"] == "08:30"
+    assert state["schul_ende_period"] == 1
+    assert state["schul_ende_date"] == "2026-10-19"
+
+    # Nachmittags bleibt es der Montag.
+    state = addon.build_state(datetime(2026, 10, 19, 15, 0, tzinfo=TZ))
+    assert state["schul_start"] == "07:45"
+    assert state["schul_ende"] == "08:30"
+
+    # 00:30 am Dienstag: neuer Tag, neue Zeiten.
+    state = addon.build_state(datetime(2026, 10, 20, 0, 30, tzinfo=TZ))
+    assert state["schul_start"] == "09:50"
+    assert state["schul_start_date"] == "2026-10-20"
+    assert state["schul_ende"] == "10:35"
+
+
+def test_build_state_uses_fallback_times_without_plan_data() -> None:
+    """Ohne Verbindung und ohne Cache gelten 08:10 und 13:20."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = None
+    addon.last_error = "Keine Verbindung"
+    state = addon.build_state(now)
+    assert state["schul_start"] == "08:10"
+    assert state["schul_ende"] == "13:20"
+    assert state["schul_start_source"] == "fallback"
+    assert state["schul_ende_source"] == "fallback"
 
 
 def test_should_refresh_respects_age_and_night() -> None:
@@ -359,7 +420,10 @@ def test_refresh_marks_filter_error_and_keeps_last_dataset() -> None:
     assert "Eigenschaft classes" in (addon.last_error or "")
     state = addon.build_state(now)
     assert state["status"] == "ok"
-    assert state["connection"] == "verbindung fehlgeschlagen"
+    # Der Filterfehler ist ein Abrufproblem, kein Verbindungsverlust: Die
+    # Plandaten gelten weiter, der Fehler steht in last_error.
+    assert state["connection"] == "verbunden"
+    assert "Eigenschaft classes" in state["last_error"]
 
 
 def test_refresh_holidays_loads_calendar(monkeypatch) -> None:

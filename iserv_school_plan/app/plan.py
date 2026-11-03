@@ -13,6 +13,13 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Berlin")
 NOON = time(12, 0)
+# Der Tag wechselt um Mitternacht: "Schul start" und "Schul ende" zeigen immer
+# den laufenden Tag. Ist heute kein Schultag (Wochenende, Ferien, keine Stunden),
+# gilt der naechste - genau wie beim Wecker.
+# Ohne Plandaten (keine Verbindung, kein Cache) gelten die ueblichen Zeiten,
+# damit Automationen nicht auf "unknown" laufen.
+FALLBACK_START = time(8, 10)
+FALLBACK_END = time(13, 20)
 
 STATUS_OK = "ok"
 STATUS_FERIEN = "ferien"
@@ -241,6 +248,26 @@ class TomorrowPlan:
         return self.first_lesson.period if self.first_lesson else None
 
 
+@dataclass
+class SchoolTimes:
+    """Beginn und Ende des Schultags, den die Sensoren gerade zeigen.
+
+    Beide Werte gehoeren zum selben Tag: dem laufenden Schultag. Um Mitternacht
+    wechselt der Tag; ist heute kein Schultag, gilt der naechste.
+    """
+
+    start: datetime | None = None
+    start_date: date | None = None
+    start_period: int | None = None
+    end: datetime | None = None
+    end_date: date | None = None
+    end_period: int | None = None
+    end_reason: str = ""
+    # "plan" = aus IServ/Stundenzeiten, "fallback" = Standardzeiten ohne Daten
+    start_source: str = "plan"
+    end_source: str = "plan"
+
+
 def parse_period_times(spec: str | None) -> dict[int, tuple[time, time | None]]:
     """Parst ``1=07:45-08:30;2=08:35-09:20`` (Endzeit optional)."""
     mapping: dict[int, tuple[time, time | None]] = {}
@@ -328,11 +355,14 @@ def select_plan(
     dataset: PlanDataset | None,
     holidays: list[Holiday] | None = None,
     lookahead_days: int = 21,
+    cutover: time | None = NOON,
 ) -> PlanResult:
     """Ermittelt den naechsten Schultag mit stattfindender Stunde.
 
     Regeln:
-    * Mo-Do vor 12:00: heutiger Tag; ab 12:00 (und am Wochenende): Folgetag.
+    * Vor ``cutover`` (Standard 12:00): heutiger Tag; danach und am Wochenende:
+      Folgetag. ``cutover=None`` heisst: der heutige Tag zaehlt immer - das
+      nutzen "Schul start" und "Schul ende", die um Mitternacht umspringen.
     * Wochenende, Ferien/Feiertage und Tage ohne stattfindende Stunde werden
       uebersprungen; der Ferien-/Feiertagskalender greift nur fuer Tage, fuer
       die IServ gar keine Daten liefert (Daten haben immer Vorrang).
@@ -340,7 +370,7 @@ def select_plan(
     """
     now = _local(now)
     today = now.date()
-    if today.weekday() >= 5 or now.time() >= NOON:
+    if today.weekday() >= 5 or (cutover is not None and now.time() >= cutover):
         start = today + timedelta(days=1)
     else:
         start = today
@@ -475,6 +505,79 @@ def plan_tomorrow(
     if day_plan is None:
         return TomorrowPlan(tomorrow, reason="keine Daten")
     return TomorrowPlan(tomorrow, reason="kein Unterricht")
+
+
+def _no_data(plan: PlanResult) -> bool:
+    """True, wenn fuer den gesuchten Tag ueberhaupt keine Plandaten vorliegen.
+
+    Abzugrenzen von "Ferien" und "kein Unterricht": Dort gibt es Daten, nur
+    eben keinen Unterricht - dann bleibt der Sensor bewusst leer.
+    """
+    return plan.status == STATUS_ERROR and plan.day is None
+
+
+def _last_timed(lessons: list[Lesson]) -> Lesson | None:
+    """Letzte Stunde mit bekannter Endzeit - Ausfaelle sind schon aussortiert."""
+    timed = [lesson for lesson in lessons if lesson.end is not None]
+    if not timed:
+        return None
+    return max(timed, key=lambda lesson: (lesson.end, lesson.period or 0))
+
+
+def school_times(
+    now: datetime,
+    dataset: PlanDataset | None,
+    holidays: list[Holiday] | None = None,
+    lookahead_days: int = 21,
+) -> SchoolTimes:
+    """Beginn und Ende fuer die Sensoren "Schul start" und "Schul ende".
+
+    Beide Werte gelten fuer den laufenden Tag; um Mitternacht springen sie auf
+    den neuen Tag um. Ist heute kein Schultag, gilt der naechste. Als Ende
+    zaehlt die letzte Stunde, die tatsaechlich stattfindet - entfallene Stunden
+    am Tagesende verschieben das Ende nach vorne.
+
+    Fehlen die Plandaten fuer den gesuchten Tag (keine Verbindung, Cache zu alt),
+    gelten ``FALLBACK_START`` und ``FALLBACK_END``, damit Automationen nicht auf
+    "unknown" laufen. An Ferien- und unterrichtsfreien Tagen bleibt der Wert
+    dagegen leer - dort ist "keine Schule" die richtige Antwort.
+    """
+    now = _local(now)
+    start_plan = select_plan(now, dataset, holidays, lookahead_days, cutover=None)
+    end_plan = select_plan(now, dataset, holidays, lookahead_days, cutover=None)
+
+    start = start_plan.start
+    start_date = start_plan.target_date
+    start_source = "plan"
+    if start is None and _no_data(start_plan):
+        start = datetime.combine(now.date(), FALLBACK_START, tzinfo=TZ)
+        start_date = now.date()
+        start_source = "fallback"
+
+    last = _last_timed(end_plan.day.held_lessons) if end_plan.day else None
+    end: datetime | None = None
+    if last is not None and last.end is not None and end_plan.target_date is not None:
+        end = datetime.combine(end_plan.target_date, last.end, tzinfo=TZ)
+    end_date = end_plan.target_date
+    end_reason = end_plan.reason
+    end_source = "plan"
+    if end is None and _no_data(end_plan):
+        end = datetime.combine(now.date(), FALLBACK_END, tzinfo=TZ)
+        end_date = now.date()
+        end_reason = "keine Plandaten - Standardzeiten"
+        end_source = "fallback"
+
+    return SchoolTimes(
+        start=start,
+        start_date=start_date,
+        start_period=start_plan.first_period,
+        end=end,
+        end_date=end_date,
+        end_period=last.period if last else None,
+        end_reason=end_reason,
+        start_source=start_source,
+        end_source=end_source,
+    )
 
 
 def hours_until(now: datetime, start: datetime | None) -> int | None:

@@ -39,15 +39,21 @@ ignoriert; Details zur Migration stehen im `CHANGELOG.md`.
 ## Entities
 
 - `sensor.stundenplan_status` – `verbinden`, `verbunden` oder
-  `verbindung fehlgeschlagen` (Attribute u. a. `plan_status`, `bundesland`,
+  `verbindung fehlgeschlagen` – ein einzelner fehlgeschlagener Abruf schaltet
+  nicht um (Attribute u. a. `plan_status`, `bundesland`,
   `holidays_updated`, `last_error`, `skipped`, `warnings`)
 - `sensor.erste_unterrichtsstunde` – Stundennummer; Attribute `start` (07:45),
   `start_iso`, `hours_until`, `target_date`, `subject`, `room`,
   `cancelled_periods`
-- `sensor.naechster_schultag` – Uhrzeit der ersten Stunde am nächsten Schultag
-  im 24-Stunden-Format (`07:45`), `unknown` ohne bekannte Stunde; Attribute
-  `date` (ISO-Datum), `start`, `start_iso`, `hours_until`, `period`, `subject`,
-  `room`, `planned_first_period`, `reason`, `status`, `cancelled_periods`
+- `sensor.schul_start` – Beginn des Schultags im 24-Stunden-Format (`08:10`);
+  Attribute `date` (ISO-Datum), `start`, `start_iso`, `period`, `source`,
+  `plan_status`. Gilt für den laufenden Tag; um Mitternacht springt er um,
+  ist heute kein Schultag, gilt der nächste
+- `sensor.schul_ende` – Ende der letzten stattfindenden Stunde (`13:20`);
+  Attribute `date`, `end`, `end_iso`, `period`, `source`, `reason`,
+  `plan_status`. Gilt für denselben Tag wie `schul_start`
+- Ohne Plandaten melden beide Sensoren `08:10` und `13:20` (Quelle
+  `fallback`), damit Automatisierungen weiterlaufen
 - `binary_sensor.wecker_morgen` – `on` nur, wenn morgen ein Schultag mit
   stattfindender Stunde ist (Attribute `date`, `start`, `period`, `subject`,
   `room`, `reason`, `plan_status`)

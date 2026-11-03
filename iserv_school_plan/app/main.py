@@ -22,10 +22,11 @@ from .plan import (
     apply_period_times,
     hours_until,
     plan_tomorrow,
+    school_times,
     select_plan,
 )
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -33,6 +34,12 @@ TICK_SECONDS = 30
 RETRY_MINUTES = 5
 # Nach mehreren Fehlversuchen waechst die Wartezeit (5, 10, 20, 40, 60 Minuten).
 RETRY_MAX_MINUTES = 60
+# Erst nach so vielen Fehlversuchen in Folge gilt die Verbindung als weg: Ein
+# einzelner Aussetzer laesst die vorhandenen Plandaten unberuehrt, der Fehler
+# steht als ``last_error`` im Attribut.
+FAILURES_BEFORE_OFFLINE = 2
+# Aelter duerfen die Plandaten nicht werden, sonst gilt der Stand als veraltet.
+DATA_MAX_AGE = timedelta(hours=12)
 # Ferien/Feiertage werden alle sieben Tage aktualisiert; nach einem Netzfehler
 # fruehestens nach sechs Stunden erneut versuchen.
 LOOKAHEAD_DAYS = 21
@@ -276,12 +283,22 @@ class Addon:
         )
 
     # ----------------------------------------------------------------- State
-    def connection_state(self) -> str:
-        """Zustand der Anbindung: ``verbinden`` -> ``verbunden``/``fehlgeschlagen``."""
-        if self.last_error:
-            return CONNECTION_FAILED
+    def connection_state(self, now: datetime) -> str:
+        """Zustand der Anbindung: ``verbinden`` -> ``verbunden``/``fehlgeschlagen``.
+
+        Ein einzelner fehlgeschlagener Abruf schaltet den Status nicht um: Die
+        vorhandenen Plandaten bleiben gueltig, der Fehler steht als
+        ``last_error`` im Attribut. Erst wenn mehrere Versuche in Folge
+        scheitern oder die Daten zu alt sind, gilt die Verbindung als weg.
+        Das verhindert das staendige Hin und Her bei kurzen Aussetzern.
+        """
         if self.dataset is None:
-            return CONNECTING
+            return CONNECTION_FAILED if self.last_error else CONNECTING
+        fetched_at = self.dataset.fetched_at
+        if fetched_at is not None and now - fetched_at > DATA_MAX_AGE:
+            return CONNECTION_FAILED
+        if self.failure_count >= FAILURES_BEFORE_OFFLINE:
+            return CONNECTION_FAILED
         return CONNECTED
 
     def build_state(self, now: datetime) -> dict:
@@ -302,9 +319,12 @@ class Addon:
         start_iso = result.start.isoformat() if result.start else None
         warnings = list(dataset.warnings if dataset else [])
         warnings.extend(self.holidays.warnings)
+        # Start/Ende fuer die Sensoren "Schul start" und "Schul ende"; ohne
+        # Plandaten liefert das die Standardzeiten aus plan.FALLBACK_*.
+        times = school_times(now, dataset, self.holidays.ranges, LOOKAHEAD_DAYS)
 
         return {
-            "connection": self.connection_state(),
+            "connection": self.connection_state(now),
             "mqtt_connected": self.publisher.connected,
             "status": result.status,
             "start": start,
@@ -343,6 +363,17 @@ class Addon:
                 tomorrow.first_lesson.room if tomorrow.first_lesson else None
             ),
             "wecker_morgen_reason": tomorrow.reason,
+            "schul_start": times.start.strftime("%H:%M") if times.start else None,
+            "schul_start_date": times.start_date.isoformat() if times.start_date else None,
+            "schul_start_iso": times.start.isoformat() if times.start else None,
+            "schul_start_period": times.start_period,
+            "schul_start_source": times.start_source,
+            "schul_ende": times.end.strftime("%H:%M") if times.end else None,
+            "schul_ende_date": times.end_date.isoformat() if times.end_date else None,
+            "schul_ende_iso": times.end.isoformat() if times.end else None,
+            "schul_ende_period": times.end_period,
+            "schul_ende_source": times.end_source,
+            "schul_ende_reason": times.end_reason,
         }
 
     def tick(self, now: datetime) -> None:

@@ -17,10 +17,12 @@ from app.plan import (
     hours_until,
     parse_period_times,
     plan_tomorrow,
+    school_times,
     select_plan,
 )
 
 MONDAY = date(2026, 10, 19)
+TUESDAY = date(2026, 10, 20)
 WEDNESDAY = date(2026, 10, 21)
 THURSDAY = date(2026, 10, 22)
 FRIDAY = date(2026, 10, 23)
@@ -44,8 +46,19 @@ def day_plan(day: date, *lessons: Lesson, is_school_day: bool | None = True) -> 
     return DayPlan(date=day, lessons=list(lessons), is_school_day=is_school_day)
 
 
-def lesson(period: int, start: time | None = None, cancelled: bool = False) -> Lesson:
-    return Lesson(period=period, start=start, subject=f"Fach {period}", cancelled=cancelled)
+def lesson(
+    period: int,
+    start: time | None = None,
+    cancelled: bool = False,
+    end: time | None = None,
+) -> Lesson:
+    return Lesson(
+        period=period,
+        start=start,
+        end=end,
+        subject=f"Fach {period}",
+        cancelled=cancelled,
+    )
 
 
 def holiday(start: date, end: date, name: str = "Ferien", kind: str = "ferien") -> Holiday:
@@ -289,3 +302,64 @@ def test_hours_until() -> None:
     assert hours_until(at(WEDNESDAY, 8), at(WEDNESDAY, 7, 45)) == 0
     assert hours_until(at(WEDNESDAY, 8), None) is None
 
+
+def test_school_times_switch_at_midnight_and_last_lesson() -> None:
+    """Um Mitternacht wechselt der Tag; Ende ist die letzte stattfindende Stunde.
+
+    Die entfallene dritte Stunde schiebt das Ende nach vorne auf die zweite.
+    """
+    dataset = dataset_with(
+        day_plan(
+            MONDAY,
+            lesson(1, time(7, 45), end=time(8, 30)),
+            lesson(2, time(8, 35), end=time(9, 20)),
+            lesson(3, time(9, 50), end=time(10, 35), cancelled=True),
+        ),
+        day_plan(TUESDAY, lesson(1, time(7, 45), end=time(8, 30))),
+    )
+
+    # 23:59 am Montag gehoert noch zum Montag.
+    times = school_times(at(MONDAY, 23, 59), dataset)
+    assert times.start == at(MONDAY, 7, 45)
+    assert times.end == at(MONDAY, 9, 20)
+    assert times.end_period == 2
+    assert times.start_date == times.end_date == MONDAY
+    assert times.start_source == times.end_source == "plan"
+
+    # 00:01 am Dienstag ist schon der Dienstag.
+    times = school_times(at(TUESDAY, 0, 1), dataset)
+    assert times.start_date == times.end_date == TUESDAY
+    assert times.start == at(TUESDAY, 7, 45)
+    assert times.end == at(TUESDAY, 8, 30)
+
+    # Auch nachmittags bleibt es der laufende Tag.
+    times = school_times(at(MONDAY, 15), dataset)
+    assert times.start_date == MONDAY
+    assert times.end == at(MONDAY, 9, 20)
+
+
+def test_school_times_fallback_without_data() -> None:
+    """Ohne Plandaten gelten die Standardzeiten (08:10/13:20)."""
+    times = school_times(at(MONDAY, 9), None)
+    assert times.start == at(MONDAY, 8, 10)
+    assert times.end == at(MONDAY, 13, 20)
+    assert times.start_source == times.end_source == "fallback"
+    assert times.start_date == times.end_date == MONDAY
+
+
+def test_school_times_fallback_when_day_is_missing() -> None:
+    """Deckt der Cache den laufenden Tag nicht ab, gelten die Standardzeiten."""
+    dataset = dataset_with(day_plan(MONDAY, lesson(1, time(7, 45), end=time(8, 30))))
+    times = school_times(at(TUESDAY, 10, 30), dataset)
+    assert times.start == at(TUESDAY, 8, 10)
+    assert times.end == at(TUESDAY, 13, 20)
+    assert times.start_source == times.end_source == "fallback"
+
+
+def test_school_times_keeps_unknown_on_holidays() -> None:
+    """An Ferien bleibt der Sensor leer - dort ist "keine Schule" die Antwort."""
+    dataset = dataset_with(day_plan(MONDAY, is_school_day=False))
+    times = school_times(at(MONDAY, 9), dataset, [holiday(MONDAY, MONDAY)])
+    assert times.start is None
+    assert times.end is None
+    assert times.start_source == "plan"

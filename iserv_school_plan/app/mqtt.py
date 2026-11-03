@@ -43,12 +43,15 @@ ATTRIBUTES = {
     "'subject': value_json.subject, 'room': value_json.room, "
     "'planned_first_period': value_json.planned_first_period, "
     "'cancelled_periods': value_json.cancelled_periods} | tojson }}",
-    "date": "{{ {'date': value_json.target_date, 'start': value_json.start, "
-    "'start_iso': value_json.start_iso, 'hours_until': value_json.hours_until, "
-    "'period': value_json.period, 'subject': value_json.subject, "
-    "'room': value_json.room, 'planned_first_period': value_json.planned_first_period, "
-    "'reason': value_json.reason, 'status': value_json.status, "
-    "'cancelled_periods': value_json.cancelled_periods} | tojson }}",
+    "schul_start": "{{ {'date': value_json.schul_start_date, "
+    "'start': value_json.schul_start, 'start_iso': value_json.schul_start_iso, "
+    "'period': value_json.schul_start_period, 'source': value_json.schul_start_source, "
+    "'plan_status': value_json.status} | tojson }}",
+    "schul_ende": "{{ {'date': value_json.schul_ende_date, "
+    "'end': value_json.schul_ende, 'end_iso': value_json.schul_ende_iso, "
+    "'period': value_json.schul_ende_period, 'source': value_json.schul_ende_source, "
+    "'reason': value_json.schul_ende_reason, "
+    "'plan_status': value_json.status} | tojson }}",
     "morgen": "{{ {'date': value_json.wecker_morgen_date, "
     "'start': value_json.wecker_morgen_start, 'period': value_json.wecker_morgen_period, "
     "'subject': value_json.wecker_morgen_subject, 'room': value_json.wecker_morgen_room, "
@@ -59,6 +62,8 @@ ATTRIBUTES = {
 REMOVED_DISCOVERY = (
     ("sensor", "iserv_stundenbeginn"),
     ("binary_sensor", "iserv_schulwecker"),
+    # 1.2.0: "Naechster Schultag" heisst jetzt "Schul start"/"Schul ende".
+    ("sensor", "iserv_naechster_schultag"),
 )
 
 
@@ -117,19 +122,36 @@ def discovery_messages(prefix: str, device_name: str, version: str) -> list[tupl
         ),
         config(
             "sensor",
-            "iserv_naechster_schultag",
+            "iserv_schul_start",
             {
-                "name": "Naechster Schultag",
-                "icon": "mdi:calendar-clock",
-                # Kein device_class "date": der Zustand ist die Uhrzeit der
-                # ersten Stunde (24-Stunden-Format, z. B. 07:45); das Datum
-                # steht im Attribut "date".
-                "value_template": "{{ value_json.start if value_json.start "
+                "name": "Schul start",
+                "icon": "mdi:clock-start",
+                # Kein device_class "date": der Zustand ist die Uhrzeit im
+                # 24-Stunden-Format (z. B. 08:10); das Datum steht im Attribut
+                # "date". Bis 10:00 gilt der heutige Schultag, danach der
+                # naechste.
+                "value_template": "{{ value_json.schul_start if value_json.schul_start "
                 "else 'unknown' }}",
                 "json_attributes_topic": STATE_TOPIC,
-                "json_attributes_template": ATTRIBUTES["date"],
+                "json_attributes_template": ATTRIBUTES["schul_start"],
             },
-            object_id="naechster_schultag",
+            object_id="schul_start",
+        ),
+        config(
+            "sensor",
+            "iserv_schul_ende",
+            {
+                "name": "Schul ende",
+                "icon": "mdi:clock-end",
+                # Ende ist die letzte stattfindende Stunde; entfallene Stunden
+                # schieben das Ende nach vorne. Bis 18:00 gilt der heutige
+                # Schultag, danach der naechste.
+                "value_template": "{{ value_json.schul_ende if value_json.schul_ende "
+                "else 'unknown' }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": ATTRIBUTES["schul_ende"],
+            },
+            object_id="schul_ende",
         ),
         config(
             "binary_sensor",
