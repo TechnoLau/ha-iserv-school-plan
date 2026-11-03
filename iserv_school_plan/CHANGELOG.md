@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1
+
+- `sensor.schul_start` und `sensor.schul_ende` fallen nur noch dann auf die
+  Standardzeiten `08:10`/`13:20` zurueck, wenn `sensor.stundenplan_status`
+  `verbindung fehlgeschlagen` meldet. Fehlt nur der Plan fuer den Tag, waehrend
+  die Verbindung steht, bleibt der Wert leer - geraten wird nicht.
+
 ## 1.2.0
 
 **Neue Sensoren "Schul start" und "Schul ende" - bitte Automatisierungen anpassen.**

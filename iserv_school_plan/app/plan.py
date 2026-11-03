@@ -507,15 +507,6 @@ def plan_tomorrow(
     return TomorrowPlan(tomorrow, reason="kein Unterricht")
 
 
-def _no_data(plan: PlanResult) -> bool:
-    """True, wenn fuer den gesuchten Tag ueberhaupt keine Plandaten vorliegen.
-
-    Abzugrenzen von "Ferien" und "kein Unterricht": Dort gibt es Daten, nur
-    eben keinen Unterricht - dann bleibt der Sensor bewusst leer.
-    """
-    return plan.status == STATUS_ERROR and plan.day is None
-
-
 def _last_timed(lessons: list[Lesson]) -> Lesson | None:
     """Letzte Stunde mit bekannter Endzeit - Ausfaelle sind schon aussortiert."""
     timed = [lesson for lesson in lessons if lesson.end is not None]
@@ -529,6 +520,7 @@ def school_times(
     dataset: PlanDataset | None,
     holidays: list[Holiday] | None = None,
     lookahead_days: int = 21,
+    offline: bool = False,
 ) -> SchoolTimes:
     """Beginn und Ende fuer die Sensoren "Schul start" und "Schul ende".
 
@@ -537,46 +529,40 @@ def school_times(
     zaehlt die letzte Stunde, die tatsaechlich stattfindet - entfallene Stunden
     am Tagesende verschieben das Ende nach vorne.
 
-    Fehlen die Plandaten fuer den gesuchten Tag (keine Verbindung, Cache zu alt),
-    gelten ``FALLBACK_START`` und ``FALLBACK_END``, damit Automationen nicht auf
-    "unknown" laufen. An Ferien- und unterrichtsfreien Tagen bleibt der Wert
-    dagegen leer - dort ist "keine Schule" die richtige Antwort.
+    ``offline=True`` (Status "verbindung fehlgeschlagen") liefert die
+    Standardzeiten ``FALLBACK_START``/``FALLBACK_END``. Nur dann: Solange die
+    Verbindung steht, bleibt der Wert leer, wenn fuer den Tag kein Plan
+    vorliegt - geraten wird nicht.
     """
     now = _local(now)
+    if offline:
+        today = now.date()
+        return SchoolTimes(
+            start=datetime.combine(today, FALLBACK_START, tzinfo=TZ),
+            start_date=today,
+            end=datetime.combine(today, FALLBACK_END, tzinfo=TZ),
+            end_date=today,
+            end_reason="Verbindung fehlgeschlagen - Standardzeiten",
+            start_source="fallback",
+            end_source="fallback",
+        )
+
     start_plan = select_plan(now, dataset, holidays, lookahead_days, cutover=None)
     end_plan = select_plan(now, dataset, holidays, lookahead_days, cutover=None)
-
-    start = start_plan.start
-    start_date = start_plan.target_date
-    start_source = "plan"
-    if start is None and _no_data(start_plan):
-        start = datetime.combine(now.date(), FALLBACK_START, tzinfo=TZ)
-        start_date = now.date()
-        start_source = "fallback"
 
     last = _last_timed(end_plan.day.held_lessons) if end_plan.day else None
     end: datetime | None = None
     if last is not None and last.end is not None and end_plan.target_date is not None:
         end = datetime.combine(end_plan.target_date, last.end, tzinfo=TZ)
-    end_date = end_plan.target_date
-    end_reason = end_plan.reason
-    end_source = "plan"
-    if end is None and _no_data(end_plan):
-        end = datetime.combine(now.date(), FALLBACK_END, tzinfo=TZ)
-        end_date = now.date()
-        end_reason = "keine Plandaten - Standardzeiten"
-        end_source = "fallback"
 
     return SchoolTimes(
-        start=start,
-        start_date=start_date,
+        start=start_plan.start,
+        start_date=start_plan.target_date,
         start_period=start_plan.first_period,
         end=end,
-        end_date=end_date,
+        end_date=end_plan.target_date,
         end_period=last.period if last else None,
-        end_reason=end_reason,
-        start_source=start_source,
-        end_source=end_source,
+        end_reason=end_plan.reason,
     )
 
 

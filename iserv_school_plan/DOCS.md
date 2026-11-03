@@ -52,8 +52,10 @@ ignoriert; Details zur Migration stehen im `CHANGELOG.md`.
 - `sensor.schul_ende` – Ende der letzten stattfindenden Stunde (`13:20`);
   Attribute `date`, `end`, `end_iso`, `period`, `source`, `reason`,
   `plan_status`. Gilt für denselben Tag wie `schul_start`
-- Ohne Plandaten melden beide Sensoren `08:10` und `13:20` (Quelle
-  `fallback`), damit Automatisierungen weiterlaufen
+- Ist die Verbindung fehlgeschlagen (`verbindung fehlgeschlagen`), melden
+  beide Sensoren `08:10` und `13:20` (Quelle `fallback`), damit
+  Automatisierungen weiterlaufen. Fehlt nur der Plan für den Tag, bleibt der
+  Wert leer
 - `binary_sensor.wecker_morgen` – `on` nur, wenn morgen ein Schultag mit
   stattfindender Stunde ist (Attribute `date`, `start`, `period`, `subject`,
   `room`, `reason`, `plan_status`)

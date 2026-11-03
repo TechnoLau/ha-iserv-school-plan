@@ -293,24 +293,38 @@ def test_build_state_exposes_schul_start_und_ende() -> None:
     assert state["schul_start"] == "07:45"
     assert state["schul_ende"] == "08:30"
 
-    # 00:30 am Dienstag: neuer Tag, neue Zeiten.
+    # 00:30 am Dienstag: neuer Tag, neue Zeiten (Daten dafuer frisch holen -
+    # sonst gelten sie nach zwoelf Stunden als veraltet, siehe DATA_MAX_AGE).
+    addon.dataset = make_dataset(datetime(2026, 10, 20, 0, 30, tzinfo=TZ))
     state = addon.build_state(datetime(2026, 10, 20, 0, 30, tzinfo=TZ))
     assert state["schul_start"] == "09:50"
     assert state["schul_start_date"] == "2026-10-20"
     assert state["schul_ende"] == "10:35"
 
 
-def test_build_state_uses_fallback_times_without_plan_data() -> None:
-    """Ohne Verbindung und ohne Cache gelten 08:10 und 13:20."""
+def test_build_state_uses_fallback_times_when_connection_failed() -> None:
+    """08:10/13:20 gelten nur bei "verbindung fehlgeschlagen"."""
     now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
     addon = make_addon()
     addon.dataset = None
     addon.last_error = "Keine Verbindung"
     state = addon.build_state(now)
+    assert state["connection"] == "verbindung fehlgeschlagen"
     assert state["schul_start"] == "08:10"
     assert state["schul_ende"] == "13:20"
     assert state["schul_start_source"] == "fallback"
     assert state["schul_ende_source"] == "fallback"
+
+
+def test_build_state_does_not_guess_while_connecting() -> None:
+    """Vor dem ersten Abruf (Status "verbinden") bleibt der Wert leer."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = None
+    state = addon.build_state(now)
+    assert state["connection"] == "verbinden"
+    assert state["schul_start"] is None
+    assert state["schul_ende"] is None
 
 
 def test_should_refresh_respects_age_and_night() -> None:

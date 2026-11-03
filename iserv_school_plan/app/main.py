@@ -26,7 +26,7 @@ from .plan import (
     select_plan,
 )
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -319,12 +319,19 @@ class Addon:
         start_iso = result.start.isoformat() if result.start else None
         warnings = list(dataset.warnings if dataset else [])
         warnings.extend(self.holidays.warnings)
-        # Start/Ende fuer die Sensoren "Schul start" und "Schul ende"; ohne
-        # Plandaten liefert das die Standardzeiten aus plan.FALLBACK_*.
-        times = school_times(now, dataset, self.holidays.ranges, LOOKAHEAD_DAYS)
+        connection = self.connection_state(now)
+        # "Schul start"/"Schul ende": Bei fehlgeschlagener Verbindung gelten die
+        # Standardzeiten (08:10/13:20), sonst die Zeiten aus dem Plan.
+        times = school_times(
+            now,
+            dataset,
+            self.holidays.ranges,
+            LOOKAHEAD_DAYS,
+            offline=connection == CONNECTION_FAILED,
+        )
 
         return {
-            "connection": self.connection_state(now),
+            "connection": connection,
             "mqtt_connected": self.publisher.connected,
             "status": result.status,
             "start": start,

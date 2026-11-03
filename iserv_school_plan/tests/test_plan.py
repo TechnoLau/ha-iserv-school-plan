@@ -338,22 +338,26 @@ def test_school_times_switch_at_midnight_and_last_lesson() -> None:
     assert times.end == at(MONDAY, 9, 20)
 
 
-def test_school_times_fallback_without_data() -> None:
-    """Ohne Plandaten gelten die Standardzeiten (08:10/13:20)."""
-    times = school_times(at(MONDAY, 9), None)
+def test_school_times_fallback_only_when_offline() -> None:
+    """Nur bei fehlgeschlagener Verbindung gelten 08:10/13:20."""
+    times = school_times(at(MONDAY, 9), None, offline=True)
     assert times.start == at(MONDAY, 8, 10)
     assert times.end == at(MONDAY, 13, 20)
     assert times.start_source == times.end_source == "fallback"
     assert times.start_date == times.end_date == MONDAY
+    assert "Verbindung fehlgeschlagen" in times.end_reason
 
 
-def test_school_times_fallback_when_day_is_missing() -> None:
-    """Deckt der Cache den laufenden Tag nicht ab, gelten die Standardzeiten."""
+def test_school_times_stays_unknown_when_day_is_missing() -> None:
+    """Fehlt der Plan fuer den Tag, wird nicht geraten - auch nicht auf 08:10.
+
+    Die Standardzeiten sind ausschliesslich fuer den Offline-Fall gedacht.
+    """
     dataset = dataset_with(day_plan(MONDAY, lesson(1, time(7, 45), end=time(8, 30))))
     times = school_times(at(TUESDAY, 10, 30), dataset)
-    assert times.start == at(TUESDAY, 8, 10)
-    assert times.end == at(TUESDAY, 13, 20)
-    assert times.start_source == times.end_source == "fallback"
+    assert times.start is None
+    assert times.end is None
+    assert times.start_source == times.end_source == "plan"
 
 
 def test_school_times_keeps_unknown_on_holidays() -> None:

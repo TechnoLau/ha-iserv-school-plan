@@ -276,7 +276,7 @@ automation:
 | Entities erscheinen nicht | MQTT-Integration und Broker prüfen, Add-on-Log ansehen. Nach dem Update auf 1.1.0 sind `sensor.stundenbeginn` und `binary_sensor.schulwecker_aktiv` bewusst entfernt – Automatisierungen auf `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen` umstellen. Mit 1.2.0 ist `sensor.naechster_schultag` durch `sensor.schul_start` und `sensor.schul_ende` ersetzt |
 | Ferien fehlen oder sind falsch | `bundesland` prüfen; `warnings`/`holidays_updated` im Status-Attribut kontrollieren. Ohne Internet gelten die gespeicherten Daten (max. sieben Tage alt) |
 | Wecker bleibt aus, obwohl Unterricht ist | `sensor.erste_unterrichtsstunde` (Attribute `start`, `target_date`) und `sensor.stundenplan_status` prüfen; ggf. Startzeiten über `period_times` ergänzen |
-| `sensor.schul_start`/`sensor.schul_ende` zeigen `08:10`/`13:20` | Es liegen keine Plandaten vor (keine Verbindung, kein Cache) – das Add-on fällt bewusst auf die Standardzeiten zurück. Attribut `source` steht dann auf `fallback`; `last_error` im Status nennt den Grund |
+| `sensor.schul_start`/`sensor.schul_ende` zeigen `08:10`/`13:20` | `sensor.stundenplan_status` steht auf `verbindung fehlgeschlagen` – dann gelten bewusst die Standardzeiten, damit Automationen weiterlaufen. Attribut `source` ist `fallback`, `end_reason` nennt den Grund |
 | `SSL: CERTIFICATE_VERIFY_FAILED` | Das Schul-Zertifikat ist im Container nicht vertrauenswürdig. Die Prüfung ist immer aktiv; die Schule muss ein gültiges Zertifikat (z. B. Let's Encrypt) ausliefern |
 
 Log des Add-ons: **Einstellungen → Add-ons → IServ Stundenplan → Log**. Für mehr
