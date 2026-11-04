@@ -530,9 +530,19 @@ def plan_tomorrow(
     return TomorrowPlan(tomorrow, reason="kein Unterricht")
 
 
+UMLAUTE = (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"))
+
+
 def normalize_subject(value: str | None) -> str:
-    """Vergleichsform eines Fachnamens: Kleinschreibung, einfache Leerzeichen."""
-    return re.sub(r"\s+", " ", (value or "").strip().lower())
+    """Vergleichsform eines Fachnamens.
+
+    Kleinschreibung, einfache Leerzeichen und aufgeloeste Umlaute - damit
+    "Französisch", "franzoesisch" und "FRANZOESISCH" gleich behandelt werden.
+    """
+    text = re.sub(r"\s+", " ", (value or "").strip().lower())
+    for umlaut, ersatz in UMLAUTE:
+        text = text.replace(umlaut, ersatz)
+    return text
 
 
 def split_subject_names(value: str | None) -> list[str]:
@@ -550,6 +560,22 @@ def is_ambiguous_subject(lesson: Lesson) -> bool:
     return len(split_subject_names(lesson.subject)) > 1
 
 
+def text_has_subject(value: str | None, wanted: frozenset[str]) -> bool:
+    """Steckt eines der gewaehlten Faecher in diesem Text?
+
+    Geprueft werden die ganze Angabe, ihre Teile ("Deutsch / Franz") und -
+    fuer Faelle wie "Vertretung Franz" - der Text selbst.
+    """
+    if not value:
+        return False
+    text = normalize_subject(value)
+    if text in wanted:
+        return True
+    if any(part in wanted for part in split_subjects(value)):
+        return True
+    return any(name in text for name in wanted)
+
+
 def lesson_matches_subjects(
     lesson: Lesson,
     wanted: frozenset[str] | None,
@@ -557,18 +583,17 @@ def lesson_matches_subjects(
 ) -> bool:
     """True, wenn die Stunde zu den gewaehlten Faechern gehoert.
 
-    * ``wanted`` (Option ``faecher``): beschraenkt auf diese Faecher; ohne
-      Angabe zaehlt jedes Fach.
+    * ``wanted`` (Option ``faecher``): beschraenkt auf diese Faecher. IServ
+      schreibt das zweite Fach oft in eine eigene Zeile - die landet als Notiz
+      in der Stunde, deshalb wird sie mitgeprueft.
     * ``enabled`` (Schalter): gilt nur fuer mehrdeutige Zellen ("Franz /
       Nautik") - dort muss eines der eingeschalteten Faecher vorkommen. Ist
       ``enabled`` ``None``, gibt es noch keine Auswahl und alles zaehlt.
     """
-    if wanted:
-        parts = split_subjects(lesson.subject)
-        if normalize_subject(lesson.subject) not in wanted and not any(
-            part in wanted for part in parts
-        ):
-            return False
+    if wanted and not (
+        text_has_subject(lesson.subject, wanted) or text_has_subject(lesson.note, wanted)
+    ):
+        return False
     if enabled is not None and is_ambiguous_subject(lesson):
         return any(part in enabled for part in split_subjects(lesson.subject))
     return True

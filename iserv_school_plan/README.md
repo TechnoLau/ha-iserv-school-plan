@@ -155,6 +155,11 @@ Mathe, Deutsch, Franz, Nautik
 
 - **Nur diese Fächer zählen** – für `sensor.schul_start`, `sensor.schul_ende`,
   `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen`.
+- **Auch die Notiz zählt:** IServ stellt das zweite Fach oft in eine eigene
+  Zeile („Deutsch“ oben, „Franz“ darunter). Steht dein Fach dort, wird die
+  Stunde trotzdem erkannt.
+- **Umlaute sind egal:** `Französisch`, `franzoesisch` und `FRANZOESISCH`
+  finden dasselbe Fach.
 - **Tippfehler** fallen auf: Gewählte Fächer, die im Plan nicht vorkommen,
   stehen im Attribut `faecher_unbekannt` und im Log als Warnung.
 - Leer gelassen zählen alle Fächer – das bisherige Verhalten.

@@ -709,3 +709,24 @@ def test_load_subjects_reads_saved_choice(tmp_path, monkeypatch) -> None:
     addon.load_subjects()
     assert addon.enabled_subjects() == frozenset()
 
+
+def test_subject_from_note_updates_school_end() -> None:
+    """Ein Fach, das nur in der Notiz steht, wird trotzdem erkannt."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon(faecher="Franz")
+    dataset = make_dataset(now)
+    dataset.days[date(2026, 10, 19)].lessons.append(
+        Lesson(
+            period=4,
+            start=time(11, 30),
+            end=time(12, 15),
+            subject="Deutsch",
+            note="Franz",
+            date=date(2026, 10, 19),
+        )
+    )
+    addon.dataset = dataset
+    state = addon.build_state(now)
+    assert state["schul_ende"] == "12:15"
+    assert state["faecher_unbekannt"] == []
+

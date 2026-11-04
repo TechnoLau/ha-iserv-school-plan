@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.1
+
+- **Facherkennung verbessert:** IServ schreibt ein zweites Fach oft in eine
+  eigene Zeile ("Deutsch" oben, "Franz" darunter). Diese Angabe landet als
+  Notiz in der Stunde - sie zaehlt jetzt mit. Ein Fach aus der Option
+  `faecher` wird also auch dann gefunden, wenn es nur in der Notiz steht.
+- **Umlaute egal:** "Französisch", "franzoesisch" und "FRANZOESISCH" gelten
+  als dasselbe Fach.
+- `faecher_unbekannt` prueft mit derselben Logik - ein Fach, das nur in einer
+  Notiz vorkommt, gilt nicht mehr faelschlich als Tippfehler.
+
 ## 1.4.0
 
 **Mehrdeutige Stunden: Schalter in Home Assistant.**

@@ -18,6 +18,7 @@ from app.plan import (
     parse_period_times,
     ambiguous_subjects,
     lesson_matches_subjects,
+    normalize_subject,
     plan_tomorrow,
     school_times,
     select_plan,
@@ -484,4 +485,22 @@ def test_enabled_subjects_decide_ambiguous_cells() -> None:
     assert school_times(at(MONDAY, 6), dataset, enabled=frozenset({"sport"})).end == at(
         MONDAY, 8, 30
     )
+
+
+def test_normalize_subject_folds_umlauts() -> None:
+    """Getippte und angezeigte Schreibweise sollen zusammenfinden."""
+    assert normalize_subject("Französisch") == "franzoesisch"
+    assert normalize_subject("  FRANZOESISCH ") == "franzoesisch"
+    assert normalize_subject("Kath. Religion") == "kath. religion"
+
+
+def test_lesson_matches_subject_in_note() -> None:
+    """IServ schreibt das zweite Fach oft in eine eigene Zeile -> Notiz."""
+    lesson = Lesson(subject="Deutsch", note="Franz")
+    assert lesson_matches_subjects(lesson, frozenset({"franz"})) is True
+    assert lesson_matches_subjects(lesson, frozenset({"deutsch"})) is True
+    assert lesson_matches_subjects(lesson, frozenset({"mathe"})) is False
+    # Auch mitten im Text ("Vertretung Franz").
+    vertretung = Lesson(subject="Deutsch", note="Vertretung Franz")
+    assert lesson_matches_subjects(vertretung, frozenset({"franz"})) is True
 

@@ -23,14 +23,14 @@ from .plan import (
     ambiguous_subjects,
     dataset_subjects,
     hours_until,
+    lesson_matches_subjects,
     normalize_subject,
     plan_tomorrow,
     school_times,
     select_plan,
-    subject_tokens,
 )
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 # Gewaehlte Faecher der mehrdeutigen Zellen (Schalter in Home Assistant).
@@ -505,11 +505,21 @@ class Addon:
         }
 
     def _unknown_subjects(self, dataset: PlanDataset | None) -> list[str]:
-        """Gewaehlte Faecher, die im Plan nicht vorkommen (Tippfehler-Hinweis)."""
-        if not self.options.parsed_faecher:
+        """Gewaehlte Faecher, die im Plan nicht vorkommen (Tippfehler-Hinweis).
+
+        Geprueft wird mit derselben Logik wie der Filter - inklusive Notizen,
+        in denen IServ ein zweites Fach unterbringt.
+        """
+        if not self.options.parsed_faecher or dataset is None:
             return []
-        tokens = subject_tokens(dataset_subjects(dataset))
-        return [name for name in self.options.parsed_faecher if name not in tokens]
+        lessons = [lesson for day in dataset.days.values() for lesson in day.lessons]
+        return [
+            name
+            for name in self.options.parsed_faecher
+            if not any(
+                lesson_matches_subjects(lesson, frozenset({name})) for lesson in lessons
+            )
+        ]
 
     def tick(self, now: datetime) -> None:
         self.refresh_holidays(now)

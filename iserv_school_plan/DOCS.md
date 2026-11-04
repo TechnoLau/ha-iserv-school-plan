@@ -33,8 +33,10 @@ eindeutig und werden nicht gefragt.
 
 Alternativ lässt sich die Option `faecher` als Textliste füllen
 (`Mathe, Deutsch, Franz`) – dann zählen ausschließlich diese Fächer, auch in
-eindeutigen Zellen. Tippfehler erscheinen in `faecher_unbekannt`. Ohne Auswahl
-zählt alles.
+eindeutigen Zellen. Dabei wird auch die **Notiz** geprüft: Steht das zweite
+Fach in einer eigenen Zeile („Deutsch“ / „Franz“), findet das Add-on es dort.
+Umlaute werden dabei ignoriert (`franzoesisch` = `Französisch`). Tippfehler
+erscheinen in `faecher_unbekannt`. Ohne Auswahl zählt alles.
 
 ## Optionen
 
