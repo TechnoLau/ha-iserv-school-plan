@@ -16,6 +16,7 @@ from app.plan import (
     apply_period_times,
     hours_until,
     parse_period_times,
+    ambiguous_subjects,
     lesson_matches_subjects,
     plan_tomorrow,
     school_times,
@@ -376,8 +377,8 @@ def test_split_subjects_handles_multiple_subjects_in_one_cell() -> None:
     assert split_subjects("Deutsch / Franz") == ["deutsch", "franz"]
     assert split_subjects("Mathe, Physik") == ["mathe", "physik"]
     assert split_subjects("Mathe+Physik") == ["mathe", "physik"]
-    # Faecher mit "und" im Namen bleiben waehlbar, wenn sie ganz eingetragen sind.
-    assert split_subjects("Kunst und Design") == ["kunst", "design"]
+    # "und" ist kein Trenner - "Kunst und Design" bleibt ein Fach.
+    assert split_subjects("Kunst und Design") == ["kunst und design"]
 
 
 def test_lesson_matches_subjects() -> None:
@@ -441,3 +442,46 @@ def test_plan_tomorrow_respects_subjects() -> None:
     )
     assert plan_tomorrow(at(MONDAY, 20), dataset, subjects=frozenset({"sport"})).school is True
     assert plan_tomorrow(at(MONDAY, 20), dataset, subjects=frozenset({"mathe"})).school is False
+
+
+def test_ambiguous_subjects_lists_multi_subject_cells() -> None:
+    """Nur Faecher aus Zellen mit mehreren Faechern bekommen einen Schalter."""
+    dataset = dataset_with(
+        day_plan(
+            MONDAY,
+            Lesson(period=1, start=time(7, 45), subject="Mathe"),
+            Lesson(period=2, start=time(8, 35), subject="Deutsch / Franz"),
+            Lesson(period=3, start=time(9, 50), subject="Nautik, Physik"),
+        )
+    )
+    assert ambiguous_subjects(dataset) == ["Deutsch", "Franz", "Nautik", "Physik"]
+    assert ambiguous_subjects(None) == []
+
+
+def test_enabled_subjects_decide_ambiguous_cells() -> None:
+    """Nur mehrdeutige Zellen haengen an den Schaltern."""
+    dataset = dataset_with(
+        day_plan(
+            MONDAY,
+            Lesson(period=1, start=time(7, 45), end=time(8, 30), subject="Mathe"),
+            Lesson(
+                period=2,
+                start=time(8, 35),
+                end=time(9, 20),
+                subject="Deutsch / Franz",
+            ),
+        ),
+        day_plan(TUESDAY, Lesson(period=1, start=time(7, 45), end=time(8, 30), subject="Mathe")),
+    )
+
+    # Ohne Auswahl zaehlt die mehrdeutige Zelle mit.
+    assert school_times(at(MONDAY, 6), dataset).end == at(MONDAY, 9, 20)
+    # Franz an: Zelle zaehlt.
+    assert school_times(at(MONDAY, 6), dataset, enabled=frozenset({"franz"})).end == at(
+        MONDAY, 9, 20
+    )
+    # Nur Sport an: die Zelle faellt weg, uebrig bleibt Mathe.
+    assert school_times(at(MONDAY, 6), dataset, enabled=frozenset({"sport"})).end == at(
+        MONDAY, 8, 30
+    )
+

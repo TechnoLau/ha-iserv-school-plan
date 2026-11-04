@@ -675,3 +675,37 @@ def test_build_state_reports_unknown_subjects() -> None:
     addon.dataset = make_dataset(now)
     assert addon.build_state(now)["faecher_unbekannt"] == ["nautik"]
 
+
+def test_subject_toggle_recomputes_state(tmp_path, monkeypatch) -> None:
+    """Ein Schalter in HA aendert sofort das berechnete Schulende."""
+    monkeypatch.setattr(main_module, "SUBJECT_FILE", tmp_path / "faecher.json")
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    dataset = make_dataset(now)
+    # Mehrdeutige Zelle am Montag: "Deutsch / Franz" bis 12:15.
+    dataset.days[date(2026, 10, 19)].lessons.append(
+        Lesson(
+            period=3,
+            start=time(11, 30),
+            end=time(12, 15),
+            subject="Deutsch / Franz",
+            date=date(2026, 10, 19),
+        )
+    )
+    addon.dataset = dataset
+    assert addon.build_state(now)["schul_ende"] == "12:15"
+
+    addon.on_subject_toggle("Franz", False)
+    # Franz aus: nur noch die eindeutigen Stunden zaehlen (Mathe bis 08:30).
+    assert addon.build_state(now)["schul_ende"] == "08:30"
+    assert (tmp_path / "faecher.json").exists()
+
+
+def test_load_subjects_reads_saved_choice(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "faecher.json"
+    path.write_text('{"franz": false}', encoding="utf-8")
+    monkeypatch.setattr(main_module, "SUBJECT_FILE", path)
+    addon = make_addon()
+    addon.load_subjects()
+    assert addon.enabled_subjects() == frozenset()
+

@@ -1,11 +1,11 @@
 name: IServ Stundenplan
-version: "1.3.0"
+version: "1.4.0"
 slug: iserv_school_plan
 description: >-
   Liest den IServ-Stundenplan automatisch ein und stellt Status, Schul start,
   Schul ende und "Wecker morgen" als MQTT-Entities in Home Assistant bereit.
-  Die eigenen Faecher lassen sich auswaehlen; Ferien und Feiertage werden
-  automatisch geladen.
+  Faecher mit mehreren Eintraegen je Stunde lassen sich per Schalter
+  auswaehlen; Ferien und Feiertage werden automatisch geladen.
 url: https://github.com/TechnoLau/ha-iserv-school-plan
 arch:
   - amd64

@@ -113,17 +113,41 @@ schreibt Benutzer und Passwort neu).
 - Wichtig: Ohne Startzeit kann kein Wecker berechnet werden – der Status ist dann
   `error` und der Wecker bleibt aus.
 
-### Fächer (`faecher`)
+### Fächer
 
 Beim ersten Start liest das Add-on den Plan und schreibt alle gefundenen Fächer
 ins Log:
 
 ```
 Faecher im Plan (12): Biologie, Chemie, Deutsch, Englisch, Franz, Geschichte, …
+Mehrdeutige Faecher (je ein Schalter in Home Assistant): Deutsch, Franz, Nautik
 ```
 
 Dieselbe Liste steht im Status-Sensor unter dem Attribut `faecher_gefunden`.
-Daraus trägst du deine eigenen Fächer in die Option `faecher` ein:
+
+#### Schalter für mehrdeutige Stunden
+
+Stehen in einer Zelle **mehrere Fächer** („Deutsch / Franz“), ist unklar, welches
+gilt. Für diese Fächer legt das Add-on je einen Schalter am Gerät an:
+
+```
+IServ Stundenplan
+  ├─ Fach Deutsch   ●
+  ├─ Fach Franz     ●
+  └─ Fach Nautik    ○
+```
+
+- **An** = das Fach zählt, **aus** = nicht. Einfache Zellen („Mathe“) sind
+  eindeutig und werden nicht gefragt.
+- Die Auswahl liegt in `/data/faecher.json` und überlebt Neustarts.
+- Neue Fächer erscheinen automatisch als Schalter, verschwundene werden
+  entfernt.
+- Solange du nichts umstellst, zählt wie bisher alles.
+
+#### Option `faecher` (Textfeld)
+
+Zusätzlich – oder wenn du ohne Schalter arbeiten willst – kannst du deine
+Fächer als Liste eintragen:
 
 ```text
 Mathe, Deutsch, Franz, Nautik
@@ -131,11 +155,9 @@ Mathe, Deutsch, Franz, Nautik
 
 - **Nur diese Fächer zählen** – für `sensor.schul_start`, `sensor.schul_ende`,
   `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen`.
-- **Mehrere Fächer in einer Stunde** („Deutsch / Franz“ in einer Zelle) genügt
-  eines davon. So zählt eine Vertretung nur, wenn dein Fach darin vorkommt.
 - **Tippfehler** fallen auf: Gewählte Fächer, die im Plan nicht vorkommen,
   stehen im Attribut `faecher_unbekannt` und im Log als Warnung.
-- Leer gelassen zählen alle Stunden – das bisherige Verhalten.
+- Leer gelassen zählen alle Fächer – das bisherige Verhalten.
 
 ## Ferien und Feiertage
 
@@ -165,6 +187,7 @@ Alle Entities hängen am Gerät „IServ Stundenplan“.
 | `sensor.schul_start` | Sensor | Beginn des Schultags im 24-Stunden-Format (`08:10`); das Datum steht im Attribut `date`. Gilt für den laufenden Tag, um Mitternacht springt er um; ist heute kein Schultag, gilt der nächste |
 | `sensor.schul_ende` | Sensor | Ende der letzten stattfindenden Stunde (`13:20`) – entfallene Stunden am Tagesende verschieben das Ende nach vorne. Gilt für denselben Tag wie `schul_start` |
 | `binary_sensor.wecker_morgen` | Binary Sensor | `on` nur, wenn **morgen** ein Schultag mit stattfindender Stunde ist (Sa/So immer `off`) |
+| `switch.fach_<name>` | Schalter | je Fach aus einer mehrdeutigen Zelle („Deutsch / Franz“); `on` = das Fach zählt für Start, Ende und Wecker |
 
 Die Entity-IDs sind Vorschläge von MQTT Discovery: Sie gelten beim ersten
 Anlegen der Entity und bleiben danach erhalten, auch wenn du sie in Home

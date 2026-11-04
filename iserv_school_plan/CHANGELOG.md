@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.4.0
+
+**Mehrdeutige Stunden: Schalter in Home Assistant.**
+
+- Stehen in einer Zelle mehrere Faecher ("Deutsch / Franz"), legt das Add-on
+  fuer jedes dieser Faecher einen Schalter an (`switch.fach_<name>`, Geraet
+  "IServ Stundenplan"). An = das Fach zaehlt, aus = nicht. Einfache Zellen
+  ("Mathe") sind eindeutig und bekommen keinen Schalter.
+- Die Auswahl liegt in `/data/faecher.json`, ueberlebt Neustarts und wird fuer
+  `schul_start`, `schul_ende`, `erste_unterrichtsstunde` und `wecker_morgen`
+  angewendet. Solange nichts umgestellt ist, zaehlt wie bisher alles.
+- Das Add-on hoert dafuer erstmals auf MQTT (`iserv_school_plan/fach/<name>/set`);
+  Schalter, deren Fach nicht mehr im Plan vorkommt, werden entfernt.
+- Die Option `faecher` aus 1.3.0 bleibt als Textvariante erhalten.
+- "und" gilt nicht mehr als Fach-Trenner ("Kunst und Design" bleibt ein Fach).
+
 ## 1.3.0
 
 **Neue Option `faecher`: nur die eigenen Fächer zählen.**

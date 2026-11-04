@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 from collections.abc import Callable
 from urllib.request import Request, urlopen
@@ -17,6 +18,8 @@ from .config import AddonOptions
 _LOGGER = logging.getLogger(__name__)
 
 STATE_TOPIC = "iserv_school_plan/state"
+# Eigene Topics fuer die Fach-Schalter (mehrdeutige Zellen).
+SUBJECT_TOPIC_PREFIX = "iserv_school_plan/fach"
 AVAILABILITY_TOPIC = "iserv_school_plan/availability"
 NODE_ID = "iserv_school_plan"
 SUPERVISOR_MQTT_URL = "http://supervisor/services/mqtt"
@@ -68,6 +71,42 @@ REMOVED_DISCOVERY = (
     # 1.2.0: "Naechster Schultag" heisst jetzt "Schul start"/"Schul ende".
     ("sensor", "iserv_naechster_schultag"),
 )
+
+
+def subject_slug(name: str) -> str:
+    """Stabiler Schluessel eines Fachnamens ("Französisch" -> "franzoesisch")."""
+    text = name.lower()
+    for umlaut, ersatz in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        text = text.replace(umlaut, ersatz)
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or "fach"
+
+
+def subject_switch(
+    prefix: str, device_name: str, version: str, name: str
+) -> tuple[str, dict]:
+    """Discovery fuer einen Schalter, der eine mehrdeutige Zelle aufloest.
+
+    Nur Faecher, die in einer Stunde zusammen mit anderen stehen, bekommen
+    einen Schalter - dort entscheidet die Auswahl, ob die Stunde zaehlt.
+    """
+    slug = subject_slug(name)
+    device = {**DEVICE, "name": device_name, "sw_version": version}
+    return (
+        f"{prefix}/switch/iserv_fach_{slug}/config",
+        {
+            "name": f"Fach {name}",
+            "icon": "mdi:book-open-variant",
+            "state_topic": f"{SUBJECT_TOPIC_PREFIX}/{slug}/state",
+            "command_topic": f"{SUBJECT_TOPIC_PREFIX}/{slug}/set",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device": device,
+            "unique_id": f"iserv_fach_{slug}",
+            "default_entity_id": f"switch.fach_{slug}",
+            "object_id": f"fach_{slug}",
+        },
+    )
 
 
 def discovery_messages(prefix: str, device_name: str, version: str) -> list[tuple[str, dict]]:
@@ -227,6 +266,12 @@ class MqttPublisher:
         self._credential_refreshes = 0
         self._client = self._build_client()
         self._last_state: dict | None = None
+        # Fach-Schalter: Callback (Name, an/aus) und zuletzt veroeffentlichte Topics.
+        self._subject_handler: Callable[[str, bool], None] | None = None
+        self._subject_topics: list[str] = []
+        self._subject_state_topics: list[str] = []
+        self._subject_names: dict[str, str] = {}
+        self._subject_states: dict[str, bool] = {}
 
     def _build_client(self):
         client_id = f"{NODE_ID}-{socket.gethostname()[:12]}"
@@ -246,6 +291,7 @@ class MqttPublisher:
         client.will_set(AVAILABILITY_TOPIC, "offline", retain=True)
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
+        client.on_message = self._on_message
         return client
 
     @property
@@ -299,6 +345,10 @@ class MqttPublisher:
             self.options.mqtt_discovery_prefix, self.options.device_name, self.version
         ):
             client.publish(topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True)
+        if self._subject_topics:
+            # Fach-Schalter nach einem Reconnect erneut anmelden.
+            self._republish_subjects(client)
+        client.subscribe(f"{SUBJECT_TOPIC_PREFIX}/+/set")
         if self._last_state is not None:
             client.publish(
                 STATE_TOPIC, json.dumps(self._last_state, ensure_ascii=False), qos=1, retain=True
@@ -369,6 +419,85 @@ class MqttPublisher:
 
     def _on_disconnect(self, client, userdata, *args) -> None:
         _LOGGER.warning("MQTT-Verbindung getrennt - Reconnect laeuft")
+
+    def set_subject_handler(self, handler: Callable[[str, bool], None]) -> None:
+        """Callback fuer Schaltbefehle: ``handler(fachname, an)``."""
+        self._subject_handler = handler
+
+    def publish_subjects(self, names: list[str], enabled: dict[str, bool]) -> None:
+        """Discovery und Zustand der Fach-Schalter veroeffentlichen.
+
+        ``enabled`` ist nach Anzeigename geschluesselt; fehlende Eintraege
+        gelten als eingeschaltet, damit ohne Auswahl alles zaehlt. Schalter,
+        deren Fach nicht mehr im Plan vorkommt, werden entfernt.
+        """
+        prefix = self.options.mqtt_discovery_prefix
+        topics: list[str] = []
+        state_topics: list[str] = []
+        names_by_slug: dict[str, str] = {}
+        states: dict[str, bool] = {}
+        for name in names:
+            slug = subject_slug(name)
+            on = enabled.get(name, True)
+            topic, payload = subject_switch(
+                prefix, self.options.device_name, self.version, name
+            )
+            state_topic = f"{SUBJECT_TOPIC_PREFIX}/{slug}/state"
+            topics.append(topic)
+            state_topics.append(state_topic)
+            names_by_slug[slug] = name
+            states[slug] = on
+            self._client.publish(
+                topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True
+            )
+            self._client.publish(
+                state_topic, "ON" if on else "OFF", qos=1, retain=True
+            )
+        for topic in set(self._subject_topics) - set(topics):
+            self._client.publish(topic, "", qos=1, retain=True)
+        for topic in set(self._subject_state_topics) - set(state_topics):
+            self._client.publish(topic, "", qos=1, retain=True)
+        self._subject_topics = topics
+        self._subject_state_topics = state_topics
+        self._subject_names = names_by_slug
+        self._subject_states = states
+
+    def _republish_subjects(self, client) -> None:
+        """Discovery + Zustand aller Fach-Schalter erneut senden (Reconnect)."""
+        prefix = self.options.mqtt_discovery_prefix
+        for slug, name in self._subject_names.items():
+            topic, payload = subject_switch(
+                prefix, self.options.device_name, self.version, name
+            )
+            client.publish(
+                topic, json.dumps(payload, ensure_ascii=False), qos=1, retain=True
+            )
+            client.publish(
+                f"{SUBJECT_TOPIC_PREFIX}/{slug}/state",
+                "ON" if self._subject_states.get(slug, True) else "OFF",
+                qos=1,
+                retain=True,
+            )
+
+    def _on_message(self, client, userdata, message) -> None:  # noqa: ARG002
+        """Schaltbefehl eines Fach-Schalters annehmen."""
+        topic = getattr(message, "topic", "") or ""
+        if not topic.startswith(f"{SUBJECT_TOPIC_PREFIX}/") or not topic.endswith("/set"):
+            return
+        slug = topic[len(SUBJECT_TOPIC_PREFIX) + 1 : -len("/set")].strip("/")
+        payload = (getattr(message, "payload", b"") or b"").decode("utf-8", "replace")
+        payload = payload.strip().upper()
+        if payload not in ("ON", "OFF"):
+            return
+        name = self._subject_names.get(slug)
+        if name is None:
+            _LOGGER.debug("Schaltbefehl fuer unbekanntes Fach %r ignoriert", slug)
+            return
+        state = payload == "ON"
+        self._subject_states[slug] = state
+        client.publish(f"{SUBJECT_TOPIC_PREFIX}/{slug}/state", payload, qos=1, retain=True)
+        if self._subject_handler is not None:
+            self._subject_handler(name, state)
 
     def publish_state(self, state: dict) -> None:
         if state == self._last_state:

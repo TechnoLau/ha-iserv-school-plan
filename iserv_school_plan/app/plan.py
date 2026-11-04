@@ -22,7 +22,7 @@ NOON = time(12, 0)
 FALLBACK_START = time(8, 10)
 FALLBACK_END = time(13, 20)
 # Trennzeichen zwischen mehreren Faechern in einer Zelle ("Deutsch / Franz").
-SUBJECT_SPLIT_RE = re.compile(r"[/,;+&|]|\bund\b", re.IGNORECASE)
+SUBJECT_SPLIT_RE = re.compile(r"[/,;+&|]")
 
 STATUS_OK = "ok"
 STATUS_FERIEN = "ferien"
@@ -362,6 +362,7 @@ def select_plan(
     lookahead_days: int = 21,
     cutover: time | None = NOON,
     subjects: frozenset[str] | None = None,
+    enabled: frozenset[str] | None = None,
 ) -> PlanResult:
     """Ermittelt den naechsten Schultag mit stattfindender Stunde.
 
@@ -396,8 +397,12 @@ def select_plan(
 
         day_plan = dataset.lookup(day) if dataset else None
         held = day_plan.held_lessons if day_plan else []
-        if subjects:
-            held = [lesson for lesson in held if lesson_matches_subjects(lesson, subjects)]
+        if subjects or enabled is not None:
+            held = [
+                lesson
+                for lesson in held
+                if lesson_matches_subjects(lesson, subjects, enabled)
+            ]
         holiday = find_holiday(day, holidays)
 
         if held:
@@ -481,6 +486,7 @@ def plan_tomorrow(
     dataset: PlanDataset | None,
     holidays: list[Holiday] | None = None,
     subjects: frozenset[str] | None = None,
+    enabled: frozenset[str] | None = None,
 ) -> TomorrowPlan:
     """Prueft den morgigen Kalendertag ("Wecker morgen" ja/nein)."""
     tomorrow = _local(now).date() + timedelta(days=1)
@@ -489,8 +495,10 @@ def plan_tomorrow(
 
     day_plan = dataset.lookup(tomorrow) if dataset else None
     held = day_plan.held_lessons if day_plan else []
-    if subjects:
-        held = [lesson for lesson in held if lesson_matches_subjects(lesson, subjects)]
+    if subjects or enabled is not None:
+        held = [
+            lesson for lesson in held if lesson_matches_subjects(lesson, subjects, enabled)
+        ]
     if held:
         first = _first_timed(held)
         if first is None:
@@ -527,28 +535,59 @@ def normalize_subject(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
 
 
+def split_subject_names(value: str | None) -> list[str]:
+    """Einzelfaecher einer Angabe in Originalschreibweise (fuer die Anzeige)."""
+    return [part.strip() for part in SUBJECT_SPLIT_RE.split(value or "") if part.strip()]
+
+
 def split_subjects(value: str | None) -> list[str]:
-    """Einzelfaecher einer Angabe - "Deutsch / Franz" ergibt zwei Eintraege.
+    """Einzelfaecher einer Angabe - "Deutsch / Franz" ergibt zwei Eintraege."""
+    return [normalize_subject(part) for part in split_subject_names(value)]
 
-    Faecher mit "und" im Namen bleiben erhalten, solange die Angabe als Ganzes
-    gewaehlt wurde (siehe ``lesson_matches_subjects``).
+
+def is_ambiguous_subject(lesson: Lesson) -> bool:
+    """True, wenn in der Zelle mehrere Faecher stehen ("Deutsch / Franz")."""
+    return len(split_subject_names(lesson.subject)) > 1
+
+
+def lesson_matches_subjects(
+    lesson: Lesson,
+    wanted: frozenset[str] | None,
+    enabled: frozenset[str] | None = None,
+) -> bool:
+    """True, wenn die Stunde zu den gewaehlten Faechern gehoert.
+
+    * ``wanted`` (Option ``faecher``): beschraenkt auf diese Faecher; ohne
+      Angabe zaehlt jedes Fach.
+    * ``enabled`` (Schalter): gilt nur fuer mehrdeutige Zellen ("Franz /
+      Nautik") - dort muss eines der eingeschalteten Faecher vorkommen. Ist
+      ``enabled`` ``None``, gibt es noch keine Auswahl und alles zaehlt.
     """
-    parts = [normalize_subject(part) for part in SUBJECT_SPLIT_RE.split(value or "")]
-    return [part for part in parts if part]
+    if wanted:
+        parts = split_subjects(lesson.subject)
+        if normalize_subject(lesson.subject) not in wanted and not any(
+            part in wanted for part in parts
+        ):
+            return False
+    if enabled is not None and is_ambiguous_subject(lesson):
+        return any(part in enabled for part in split_subjects(lesson.subject))
+    return True
 
 
-def lesson_matches_subjects(lesson: Lesson, wanted: frozenset[str] | None) -> bool:
-    """True, wenn die Stunde zu mindestens einem gewaehlten Fach gehoert.
+def ambiguous_subjects(dataset: PlanDataset | None) -> list[str]:
+    """Faecher aus Zellen mit mehreren Faechern, in Originalschreibweise.
 
-    Ohne Auswahl zaehlt jede Stunde. Stehen in einer Zelle mehrere Faecher
-    ("Franz / Nautik"), genuegt eines davon - so zaehlt eine Vertretung nur,
-    wenn das eigene Fach darin vorkommt.
+    Nur fuer diese Zellen ist unklar, welches Fach gilt - dafuer gibt es einen
+    Schalter. Einfachere Zellen ("Mathe") zaehlen immer.
     """
-    if not wanted:
-        return True
-    if normalize_subject(lesson.subject) in wanted:
-        return True
-    return any(part in wanted for part in split_subjects(lesson.subject))
+    seen: dict[str, str] = {}
+    for day in dataset.days.values() if dataset else []:
+        for lesson in day.lessons:
+            if not is_ambiguous_subject(lesson):
+                continue
+            for part in split_subject_names(lesson.subject):
+                seen.setdefault(normalize_subject(part), part)
+    return [seen[key] for key in sorted(seen)]
 
 
 def subject_tokens(subjects: list[str]) -> set[str]:
@@ -587,6 +626,7 @@ def school_times(
     lookahead_days: int = 21,
     offline: bool = False,
     subjects: frozenset[str] | None = None,
+    enabled: frozenset[str] | None = None,
 ) -> SchoolTimes:
     """Beginn und Ende fuer die Sensoren "Schul start" und "Schul ende".
 
@@ -614,10 +654,22 @@ def school_times(
         )
 
     start_plan = select_plan(
-        now, dataset, holidays, lookahead_days, cutover=None, subjects=subjects
+        now,
+        dataset,
+        holidays,
+        lookahead_days,
+        cutover=None,
+        subjects=subjects,
+        enabled=enabled,
     )
     end_plan = select_plan(
-        now, dataset, holidays, lookahead_days, cutover=None, subjects=subjects
+        now,
+        dataset,
+        holidays,
+        lookahead_days,
+        cutover=None,
+        subjects=subjects,
+        enabled=enabled,
     )
 
     # Nur die eigenen Faecher zaehlen fuer das Ende (Fachfilter aus select_plan).

@@ -22,13 +22,19 @@ in Home Assistant bereit.
 ## Fächer auswählen
 
 Beim ersten Abruf schreibt das Add-on alle Fächer aus dem Plan ins Log und in
-das Status-Attribut `faecher_gefunden`. Diese Namen trägst du in die Option
-`faecher` ein (`Mathe, Deutsch, Franz`).
+das Status-Attribut `faecher_gefunden`.
 
-- Nur gewählte Fächer zählen für Start, Ende, erste Stunde und Wecker.
-- Stehen in einer Stunde mehrere Fächer („Franz / Nautik“), genügt eines.
-- Gewählte Fächer ohne Treffer im Plan erscheinen in `faecher_unbekannt`.
-- Ohne Angabe zählen alle Stunden.
+**Mehrdeutige Zellen** – dort stehen mehrere Fächer („Deutsch / Franz“) – sind
+unklar. Für diese Fächer legt das Add-on je einen **Schalter** an
+(`switch.fach_<name>`, am Gerät „IServ Stundenplan“). An = das Fach zählt, aus
+= nicht. Die Auswahl wird in `/data/faecher.json` gespeichert und überlebt
+Neustarts; neue Fächer erscheinen automatisch. Einfache Zellen („Mathe“) sind
+eindeutig und werden nicht gefragt.
+
+Alternativ lässt sich die Option `faecher` als Textliste füllen
+(`Mathe, Deutsch, Franz`) – dann zählen ausschließlich diese Fächer, auch in
+eindeutigen Zellen. Tippfehler erscheinen in `faecher_unbekannt`. Ohne Auswahl
+zählt alles.
 
 ## Optionen
 

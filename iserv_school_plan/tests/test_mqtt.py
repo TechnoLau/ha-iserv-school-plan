@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from types import SimpleNamespace
 
 from app.config import AddonOptions
 from app.mqtt import (
@@ -14,6 +15,7 @@ from app.mqtt import (
     MqttPublisher,
     discovery_messages,
     removed_discovery_topics,
+    subject_switch,
 )
 
 
@@ -99,6 +101,9 @@ def test_removed_entities_are_deleted_with_empty_payload() -> None:
     class FakeClient:
         def publish(self, topic, payload, qos=0, retain=False):
             published.append((topic, payload, qos, retain))
+
+        def subscribe(self, topic):
+            return (0, 1)
 
     publisher._on_connect(FakeClient(), None, {}, 0)
 
@@ -277,7 +282,73 @@ def test_auth_error_logging_is_limited_and_reset_after_success(caplog) -> None:
         def publish(self, topic, payload, qos=0, retain=False):
             published.append((topic, payload, qos, retain))
 
+        def subscribe(self, topic):
+            return (0, 1)
+
     publisher._on_connect(FakeClient(), None, {}, 0)
     assert publisher._auth_errors == 0
     assert publisher._credential_refreshes == 0
     assert published[0] == (AVAILABILITY_TOPIC, "online", 0, True)
+
+
+def test_subject_switch_discovery_payload() -> None:
+    topic, payload = subject_switch("homeassistant", "IServ Test", "1.4.0", "Französisch")
+    assert topic == "homeassistant/switch/iserv_fach_franzoesisch/config"
+    assert payload["name"] == "Fach Französisch"
+    assert payload["state_topic"] == "iserv_school_plan/fach/franzoesisch/state"
+    assert payload["command_topic"] == "iserv_school_plan/fach/franzoesisch/set"
+    assert payload["default_entity_id"] == "switch.fach_franzoesisch"
+    assert payload["device"]["name"] == "IServ Test"
+
+
+def test_publish_subjects_creates_and_removes_switches() -> None:
+    publisher = MqttPublisher(AddonOptions(), "1.4.0")
+    published: list[tuple] = []
+
+    class FakeClient:
+        def publish(self, topic, payload, qos=0, retain=False):
+            published.append((topic, payload, qos, retain))
+
+    publisher._client = FakeClient()
+    publisher.publish_subjects(["Franz", "Nautik"], {"Franz": False})
+    sent = {topic: payload for topic, payload, *_ in published}
+    assert "homeassistant/switch/iserv_fach_franz/config" in sent
+    assert "homeassistant/switch/iserv_fach_nautik/config" in sent
+    assert sent["iserv_school_plan/fach/franz/state"] == "OFF"
+    assert sent["iserv_school_plan/fach/nautik/state"] == "ON"
+
+    published.clear()
+    publisher.publish_subjects(["Franz"], {"Franz": True})
+    removed = [topic for topic, payload, *_ in published if payload == ""]
+    assert "homeassistant/switch/iserv_fach_nautik/config" in removed
+    assert "iserv_school_plan/fach/nautik/state" in removed
+
+
+def test_subject_command_calls_handler() -> None:
+    publisher = MqttPublisher(AddonOptions(), "1.4.0")
+    calls: list[tuple[str, bool]] = []
+    published: list[tuple] = []
+
+    class FakeClient:
+        def publish(self, topic, payload, qos=0, retain=False):
+            published.append((topic, payload, qos, retain))
+
+    client = FakeClient()
+    publisher._client = client
+    publisher.set_subject_handler(lambda name, on: calls.append((name, on)))
+    publisher.publish_subjects(["Franz"], {})
+
+    message = SimpleNamespace(topic="iserv_school_plan/fach/franz/set", payload=b" OFF ")
+    publisher._on_message(client, None, message)
+    assert calls == [("Franz", False)]
+    assert ("iserv_school_plan/fach/franz/state", "OFF", 1, True) in published
+
+    # Unbekanntes Fach und ungueltiger Payload werden ignoriert.
+    publisher._on_message(client, None, SimpleNamespace(
+        topic="iserv_school_plan/fach/sport/set", payload=b"ON"
+    ))
+    publisher._on_message(client, None, SimpleNamespace(
+        topic="iserv_school_plan/fach/franz/set", payload=b"quatsch"
+    ))
+    assert calls == [("Franz", False)]
+

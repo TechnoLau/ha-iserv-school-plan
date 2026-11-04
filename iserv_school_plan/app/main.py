@@ -20,17 +20,21 @@ from .plan import (
     TZ,
     PlanDataset,
     apply_period_times,
+    ambiguous_subjects,
     dataset_subjects,
     hours_until,
+    normalize_subject,
     plan_tomorrow,
     school_times,
     select_plan,
     subject_tokens,
 )
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
+# Gewaehlte Faecher der mehrdeutigen Zellen (Schalter in Home Assistant).
+SUBJECT_FILE = DATA_DIR / "faecher.json"
 DEBUG_DIR = DATA_DIR / "debug"
 TICK_SECONDS = 30
 RETRY_MINUTES = 5
@@ -100,6 +104,8 @@ class Addon:
         # schnelles Wiederholen nichts.
         self.filter_contract_error = False
         self._running = True
+        # Fach-Schalter: normalisierter Fachname -> an/aus.
+        self.subject_enabled: dict[str, bool] = {}
 
     # ------------------------------------------------------------------ Cache
     @staticmethod
@@ -277,6 +283,7 @@ class Addon:
         self.dump_raw(self.client.last_raw, self.client.last_content_type)
         self.save_cache()
         self._log_subjects(dataset)
+        self.sync_subjects(dataset)
         _LOGGER.info(
             "Plan aktualisiert: %s Tage (%s bis %s), Quelle %s",
             len(dataset.days),
@@ -284,6 +291,72 @@ class Addon:
             dataset.coverage_end,
             dataset.source,
         )
+
+    def load_subjects(self) -> None:
+        """Gespeicherte Fach-Auswahl laden (``/data/faecher.json``)."""
+        if not SUBJECT_FILE.exists():
+            return
+        try:
+            data = json.loads(SUBJECT_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            _LOGGER.warning("Fach-Auswahl unlesbar (%s) - es zaehlen alle Faecher", err)
+            return
+        if isinstance(data, dict):
+            self.subject_enabled = {str(key): bool(value) for key, value in data.items()}
+            _LOGGER.info(
+                "Fach-Auswahl geladen: %s",
+                ", ".join(
+                    f"{name}={'an' if on else 'aus'}"
+                    for name, on in sorted(self.subject_enabled.items())
+                ),
+            )
+
+    def save_subjects(self) -> None:
+        try:
+            SUBJECT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            temp = SUBJECT_FILE.with_suffix(".tmp")
+            temp.write_text(
+                json.dumps(self.subject_enabled, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temp.replace(SUBJECT_FILE)
+        except OSError as err:
+            _LOGGER.warning("Fach-Auswahl konnte nicht gespeichert werden: %s", err)
+
+    def enabled_subjects(self) -> frozenset[str] | None:
+        """Eingeschaltete Faecher der mehrdeutigen Zellen.
+
+        ``None`` heisst: es gibt keine Auswahl, also zaehlt jede Zelle.
+        """
+        if not self.subject_enabled:
+            return None
+        return frozenset(
+            name for name, enabled in self.subject_enabled.items() if enabled
+        )
+
+    def sync_subjects(self, dataset: PlanDataset | None) -> None:
+        """Schalter fuer die mehrdeutigen Faecher anlegen/aktualisieren."""
+        names = ambiguous_subjects(dataset)
+        enabled = {
+            name: self.subject_enabled.get(normalize_subject(name), True)
+            for name in names
+        }
+        self.publisher.publish_subjects(names, enabled)
+
+    def on_subject_toggle(self, name: str, enabled: bool) -> None:
+        """Schalter in Home Assistant umgelegt."""
+        key = normalize_subject(name)
+        if self.subject_enabled.get(key) == enabled:
+            return
+        self.subject_enabled[key] = enabled
+        self.save_subjects()
+        _LOGGER.info(
+            "Fach %s %s - Start/Ende werden neu berechnet",
+            name,
+            "eingeschaltet" if enabled else "ausgeschaltet",
+        )
+        if self._running:
+            self.publisher.publish_state(self.build_state(datetime.now(TZ)))
 
     def _log_subjects(self, dataset: PlanDataset) -> None:
         """Gefundene Faecher nennen - daraus wird die Option ``faecher`` gefuellt."""
@@ -297,6 +370,12 @@ class Addon:
                 "Option 'faecher', z. B. Mathe, Franz, Nautik"
             )
             return
+        mehrdeutig = ambiguous_subjects(dataset)
+        if mehrdeutig:
+            _LOGGER.info(
+                "Mehrdeutige Faecher (je ein Schalter in Home Assistant): %s",
+                ", ".join(mehrdeutig),
+            )
         unknown = self._unknown_subjects(dataset)
         if unknown:
             _LOGGER.warning(
@@ -337,9 +416,14 @@ class Addon:
             holidays=self.holidays.ranges,
             lookahead_days=LOOKAHEAD_DAYS,
             subjects=self.subjects,
+            enabled=self.enabled_subjects(),
         )
         tomorrow = plan_tomorrow(
-            now, self.dataset, self.holidays.ranges, subjects=self.subjects
+            now,
+            self.dataset,
+            self.holidays.ranges,
+            subjects=self.subjects,
+            enabled=self.enabled_subjects(),
         )
         dataset = self.dataset
         fetched_at = dataset.fetched_at if dataset else None
@@ -361,6 +445,7 @@ class Addon:
             LOOKAHEAD_DAYS,
             offline=connection == CONNECTION_FAILED,
             subjects=self.subjects,
+            enabled=self.enabled_subjects(),
         )
 
         return {
@@ -463,12 +548,17 @@ class Addon:
         if problems:
             self.last_error = "; ".join(problems)
 
+        self.load_subjects()
         self.load_cache()
         if self.dataset is not None:
             apply_period_times(self.dataset, self.options.parsed_period_times)
         # MQTT zuerst starten, damit die Entities sofort erscheinen; die
         # Feriendaten (Netzabruf) folgen direkt danach.
+        self.publisher.set_subject_handler(self.on_subject_toggle)
         self.publisher.start()
+        if self.dataset is not None:
+            # Schalter sofort anlegen, auch wenn der erste Abruf noch laeuft.
+            self.sync_subjects(self.dataset)
         self.refresh_holidays(datetime.now(TZ), force=True)
         _LOGGER.info(
             "IServ-Schulplan %s gestartet (Server: %s, Bundesland: %s, Abruf alle %s Minuten)",
