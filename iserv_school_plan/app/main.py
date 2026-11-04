@@ -20,13 +20,15 @@ from .plan import (
     TZ,
     PlanDataset,
     apply_period_times,
+    dataset_subjects,
     hours_until,
     plan_tomorrow,
     school_times,
     select_plan,
+    subject_tokens,
 )
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 DATA_DIR = Path(os.environ.get("ISERV_DATA", "/data"))
 CACHE_FILE = DATA_DIR / "cache.json"
 DEBUG_DIR = DATA_DIR / "debug"
@@ -274,6 +276,7 @@ class Addon:
         self.last_error = None
         self.dump_raw(self.client.last_raw, self.client.last_content_type)
         self.save_cache()
+        self._log_subjects(dataset)
         _LOGGER.info(
             "Plan aktualisiert: %s Tage (%s bis %s), Quelle %s",
             len(dataset.days),
@@ -282,7 +285,33 @@ class Addon:
             dataset.source,
         )
 
+    def _log_subjects(self, dataset: PlanDataset) -> None:
+        """Gefundene Faecher nennen - daraus wird die Option ``faecher`` gefuellt."""
+        found = dataset_subjects(dataset)
+        if not found:
+            return
+        _LOGGER.info("Faecher im Plan (%d): %s", len(found), ", ".join(found))
+        if not self.options.parsed_faecher:
+            _LOGGER.info(
+                "Keine Faecher gewaehlt - alle Stunden zaehlen. Auswahl unter "
+                "Option 'faecher', z. B. Mathe, Franz, Nautik"
+            )
+            return
+        unknown = self._unknown_subjects(dataset)
+        if unknown:
+            _LOGGER.warning(
+                "Gewaehlte Faecher kommen im Plan nicht vor: %s",
+                ", ".join(unknown),
+            )
+
     # ----------------------------------------------------------------- State
+    @property
+    def subjects(self) -> frozenset[str] | None:
+        """Gewaehlte Faecher als Filter - ``None`` heisst: alle Stunden zaehlen."""
+        if not self.options.parsed_faecher:
+            return None
+        return frozenset(self.options.parsed_faecher)
+
     def connection_state(self, now: datetime) -> str:
         """Zustand der Anbindung: ``verbinden`` -> ``verbunden``/``fehlgeschlagen``.
 
@@ -307,8 +336,11 @@ class Addon:
             self.dataset,
             holidays=self.holidays.ranges,
             lookahead_days=LOOKAHEAD_DAYS,
+            subjects=self.subjects,
         )
-        tomorrow = plan_tomorrow(now, self.dataset, self.holidays.ranges)
+        tomorrow = plan_tomorrow(
+            now, self.dataset, self.holidays.ranges, subjects=self.subjects
+        )
         dataset = self.dataset
         fetched_at = dataset.fetched_at if dataset else None
         age = int((now - fetched_at).total_seconds() // 60) if fetched_at else None
@@ -328,6 +360,7 @@ class Addon:
             self.holidays.ranges,
             LOOKAHEAD_DAYS,
             offline=connection == CONNECTION_FAILED,
+            subjects=self.subjects,
         )
 
         return {
@@ -381,7 +414,17 @@ class Addon:
             "schul_ende_period": times.end_period,
             "schul_ende_source": times.end_source,
             "schul_ende_reason": times.end_reason,
+            "faecher_gewaehlt": list(self.options.parsed_faecher),
+            "faecher_gefunden": dataset_subjects(dataset),
+            "faecher_unbekannt": self._unknown_subjects(dataset),
         }
+
+    def _unknown_subjects(self, dataset: PlanDataset | None) -> list[str]:
+        """Gewaehlte Faecher, die im Plan nicht vorkommen (Tippfehler-Hinweis)."""
+        if not self.options.parsed_faecher:
+            return []
+        tokens = subject_tokens(dataset_subjects(dataset))
+        return [name for name in self.options.parsed_faecher if name not in tokens]
 
     def tick(self, now: datetime) -> None:
         self.refresh_holidays(now)

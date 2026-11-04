@@ -644,3 +644,34 @@ def test_refresh_mqtt_credentials_without_supervisor() -> None:
     assert addon.options.mqtt_username == ""
     assert addon._refresh_mqtt_credentials() is None
 
+
+def test_build_state_lists_found_subjects() -> None:
+    """Der Scan liefert die Fachliste fuer die Option 'faecher'."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon()
+    addon.dataset = make_dataset(now)
+    state = addon.build_state(now)
+    assert state["faecher_gefunden"] == ["Deutsch", "Mathematik", "Physik"]
+    assert state["faecher_gewaehlt"] == []
+    assert state["faecher_unbekannt"] == []
+
+
+def test_build_state_filters_by_selected_subjects() -> None:
+    """Montag hat kein Physik - also gilt der Dienstag."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon(faecher="Physik")
+    addon.dataset = make_dataset(now)
+    state = addon.build_state(now)
+    assert state["schul_start"] == "09:50"
+    assert state["schul_start_date"] == "2026-10-20"
+    assert state["schul_ende"] == "10:35"
+    assert state["faecher_gewaehlt"] == ["physik"]
+
+
+def test_build_state_reports_unknown_subjects() -> None:
+    """Ein Tippfehler in der Auswahl wird sichtbar."""
+    now = datetime(2026, 10, 19, 7, 0, tzinfo=TZ)
+    addon = make_addon(faecher="Physik, Nautik")
+    addon.dataset = make_dataset(now)
+    assert addon.build_state(now)["faecher_unbekannt"] == ["nautik"]
+

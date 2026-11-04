@@ -19,6 +19,17 @@ in Home Assistant bereit.
 6. Add-on starten und im Status prüfen, ob der Abruf erfolgreich war
    (`verbunden`, `plan_status: ok`).
 
+## Fächer auswählen
+
+Beim ersten Abruf schreibt das Add-on alle Fächer aus dem Plan ins Log und in
+das Status-Attribut `faecher_gefunden`. Diese Namen trägst du in die Option
+`faecher` ein (`Mathe, Deutsch, Franz`).
+
+- Nur gewählte Fächer zählen für Start, Ende, erste Stunde und Wecker.
+- Stehen in einer Stunde mehrere Fächer („Franz / Nautik“), genügt eines.
+- Gewählte Fächer ohne Treffer im Plan erscheinen in `faecher_unbekannt`.
+- Ohne Angabe zählen alle Stunden.
+
 ## Optionen
 
 | Option | Standard | Bedeutung |
@@ -30,6 +41,7 @@ in Home Assistant bereit.
 | `period_times` | 1–6 | `1=07:45-08:30;2=08:35-09:20;…` |
 | `refresh_minutes` | `30` | Abrufintervall (5–720 Minuten) |
 | `debug_dump` | `aus` | Rohantwort in `/data/debug` + Debug-Logging |
+| `faecher` | *(leer)* | Eigene Fächer (Komma): nur diese zählen. Leer = alle |
 
 Plantabelle, Format, SSL-Prüfung, Log-Level und Gerätename werden automatisch
 bestimmt. Optionen aus 1.0.x (`plan_url`, `plan_format`, `klasse`, `free_days`,

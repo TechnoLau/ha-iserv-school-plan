@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .holidays import DEFAULT_BUNDESLAND, normalize_bundesland
-from .plan import parse_period_times
+from .plan import parse_period_times, split_subjects
 
 OPTIONS_PATH = Path(os.environ.get("ISERV_OPTIONS", "/data/options.json"))
 DEFAULT_URL = "https://schule.example.org"
@@ -27,7 +27,23 @@ USER_OPTION_FIELDS = (
     "period_times",
     "refresh_minutes",
     "debug_dump",
+    "faecher",
 )
+
+
+def parse_faecher(spec: str | None) -> tuple[str, ...]:
+    """Option ``faecher`` ("Mathe, Franz") in Vergleichsformen zerlegen.
+
+    Mehrere Faecher in einer Zelle werden ebenfalls aufgeteilt: Wer
+    "Franz / Nautik" eintraegt, waehlt beide. Doppelte Eintraege fallen weg.
+    """
+    names: list[str] = []
+    for chunk in (spec or "").split(";"):
+        for part in chunk.split("\n"):
+            for name in split_subjects(part):
+                if name not in names:
+                    names.append(name)
+    return tuple(names)
 
 
 @dataclass
@@ -39,6 +55,8 @@ class AddonOptions:
     period_times: str = ""
     refresh_minutes: int = 30
     debug_dump: bool = False
+    # Eigene Faecher (leer = alle Stunden zaehlen). Mehrere durch Komma trennen.
+    faecher: str = ""
     # Laufzeitwerte: werden zur Laufzeit vom Supervisor gefuellt.
     mqtt_host: str = DEFAULT_MQTT_HOST
     mqtt_port: int = 1883
@@ -48,6 +66,7 @@ class AddonOptions:
     mqtt_discovery_prefix: str = DEFAULT_DISCOVERY_PREFIX
     device_name: str = DEVICE_NAME
     parsed_period_times: dict = field(default_factory=dict)
+    parsed_faecher: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         self.iserv_url = _normalize_url(self.iserv_url)
@@ -55,6 +74,7 @@ class AddonOptions:
         self.refresh_minutes = max(5, min(int(self.refresh_minutes or 30), 720))
         self.debug_dump = _as_bool(self.debug_dump)
         self.parsed_period_times = parse_period_times(self.period_times)
+        self.parsed_faecher = parse_faecher(self.faecher)
 
     @property
     def log_level(self) -> str:

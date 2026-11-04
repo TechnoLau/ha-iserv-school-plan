@@ -88,3 +88,14 @@ def test_validation_reports_missing_configuration() -> None:
     assert any("iserv_url" in item for item in problems)
     assert any("password" in item for item in problems)
 
+
+def test_faecher_are_parsed_and_normalised() -> None:
+    """Komma, Semikolon und mehrere Faecher in einer Zelle werden getrennt."""
+    options = AddonOptions(faecher="Mathe, Franz / Nautik; Sport")
+    assert options.parsed_faecher == ("mathe", "franz", "nautik", "sport")
+
+
+def test_faecher_default_is_empty() -> None:
+    """Ohne Auswahl zaehlen alle Stunden."""
+    assert AddonOptions().parsed_faecher == ()
+

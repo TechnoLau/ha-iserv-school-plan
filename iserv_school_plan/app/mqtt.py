@@ -37,6 +37,9 @@ ATTRIBUTES = {
     "'fetched_at': value_json.fetched_at, 'age_minutes': value_json.data_age_minutes, "
     "'mqtt_connected': value_json.mqtt_connected, 'iserv_url': value_json.iserv_url, "
     "'last_error': value_json.last_error, 'skipped': value_json.skipped, "
+    "'faecher_gewaehlt': value_json.faecher_gewaehlt, "
+    "'faecher_gefunden': value_json.faecher_gefunden, "
+    "'faecher_unbekannt': value_json.faecher_unbekannt, "
     "'warnings': value_json.warnings} | tojson }}",
     "lesson": "{{ {'start': value_json.start, 'start_iso': value_json.start_iso, "
     "'hours_until': value_json.hours_until, 'target_date': value_json.target_date, "

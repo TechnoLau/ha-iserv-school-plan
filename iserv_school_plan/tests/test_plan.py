@@ -16,9 +16,12 @@ from app.plan import (
     apply_period_times,
     hours_until,
     parse_period_times,
+    lesson_matches_subjects,
     plan_tomorrow,
     school_times,
     select_plan,
+    split_subjects,
+    subject_tokens,
 )
 
 MONDAY = date(2026, 10, 19)
@@ -367,3 +370,74 @@ def test_school_times_keeps_unknown_on_holidays() -> None:
     assert times.start is None
     assert times.end is None
     assert times.start_source == "plan"
+
+
+def test_split_subjects_handles_multiple_subjects_in_one_cell() -> None:
+    assert split_subjects("Deutsch / Franz") == ["deutsch", "franz"]
+    assert split_subjects("Mathe, Physik") == ["mathe", "physik"]
+    assert split_subjects("Mathe+Physik") == ["mathe", "physik"]
+    # Faecher mit "und" im Namen bleiben waehlbar, wenn sie ganz eingetragen sind.
+    assert split_subjects("Kunst und Design") == ["kunst", "design"]
+
+
+def test_lesson_matches_subjects() -> None:
+    wanted = frozenset({"franz", "nautik"})
+    assert lesson_matches_subjects(lesson(1), None) is True
+    assert lesson_matches_subjects(Lesson(subject="Franz"), wanted) is True
+    assert lesson_matches_subjects(Lesson(subject="Deutsch / Franz"), wanted) is True
+    assert lesson_matches_subjects(Lesson(subject="Deutsch / Mathe"), wanted) is False
+    # Ohne Auswahl zaehlt alles.
+    assert lesson_matches_subjects(Lesson(subject="Deutsch"), frozenset()) is True
+
+
+def test_subject_tokens_include_parts() -> None:
+    tokens = subject_tokens(["Deutsch / Franz", "Sport"])
+    assert {"deutsch / franz", "deutsch", "franz", "sport"} <= tokens
+
+
+def test_select_plan_uses_only_chosen_subjects() -> None:
+    """Eine Stunde in einem fremden Fach zaehlt nicht als Unterricht."""
+    dataset = dataset_with(
+        day_plan(
+            WEDNESDAY,
+            Lesson(period=1, start=time(7, 45), end=time(8, 30), subject="Mathe"),
+            Lesson(period=2, start=time(8, 35), end=time(9, 20), subject="Franz"),
+        )
+    )
+    result = select_plan(at(WEDNESDAY, 6), dataset, subjects=frozenset({"franz"}))
+    assert result.status == STATUS_OK
+    assert result.first_lesson is not None
+    assert result.first_lesson.subject == "Franz"
+    assert result.start == at(WEDNESDAY, 8, 35)
+
+    # Ein Tag ganz ohne eigene Faecher wird uebersprungen.
+    result = select_plan(at(WEDNESDAY, 6), dataset, subjects=frozenset({"sport"}))
+    assert result.status != STATUS_OK
+
+
+def test_school_times_end_ignores_other_subjects() -> None:
+    """Das Ende richtet sich nach der letzten eigenen Stunde."""
+    dataset = dataset_with(
+        day_plan(
+            MONDAY,
+            Lesson(period=1, start=time(7, 45), end=time(8, 30), subject="Mathe"),
+            Lesson(period=5, start=time(11, 30), end=time(12, 15), subject="Sport"),
+            Lesson(period=6, start=time(12, 20), end=time(13, 5), subject="Sport"),
+        ),
+        day_plan(TUESDAY, Lesson(period=1, start=time(7, 45), end=time(8, 30), subject="Mathe")),
+    )
+    times = school_times(at(MONDAY, 6), dataset, subjects=frozenset({"mathe"}))
+    assert times.start == at(MONDAY, 7, 45)
+    assert times.end == at(MONDAY, 8, 30)
+
+    times = school_times(at(MONDAY, 6), dataset, subjects=frozenset({"sport"}))
+    assert times.start == at(MONDAY, 11, 30)
+    assert times.end == at(MONDAY, 13, 5)
+
+
+def test_plan_tomorrow_respects_subjects() -> None:
+    dataset = dataset_with(
+        day_plan(TUESDAY, Lesson(period=1, start=time(7, 45), end=time(8, 30), subject="Sport"))
+    )
+    assert plan_tomorrow(at(MONDAY, 20), dataset, subjects=frozenset({"sport"})).school is True
+    assert plan_tomorrow(at(MONDAY, 20), dataset, subjects=frozenset({"mathe"})).school is False

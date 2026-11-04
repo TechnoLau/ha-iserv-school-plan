@@ -80,6 +80,7 @@ Passwort und Bundesland). Alles andere ermittelt das Add-on selbst.
 | `period_times` | Text | 1–6 | Stundenzeiten, siehe Format unten |
 | `refresh_minutes` | Zahl | `30` | Abrufintervall in Minuten (5–720) |
 | `debug_dump` | Schalter | `aus` | Rohantwort unter `/data/debug/plan_raw.*` speichern und Debug-Logging aktivieren |
+| `faecher` | Text | *(leer)* | Eigene Fächer, durch Komma getrennt – nur diese zählen für Start, Ende und Wecker. Leer = alle Stunden |
 
 Die Plantabelle, das Format, die SSL-Prüfung, das Log-Level und das Gerät
 (`IServ Stundenplan`) werden automatisch bestimmt. **Alte Optionen** aus 1.0.x
@@ -111,6 +112,30 @@ schreibt Benutzer und Passwort neu).
   liefert. Liefert IServ Zeiten (HTML-Spalte „Zeit“ oder ICS), haben diese Vorrang.
 - Wichtig: Ohne Startzeit kann kein Wecker berechnet werden – der Status ist dann
   `error` und der Wecker bleibt aus.
+
+### Fächer (`faecher`)
+
+Beim ersten Start liest das Add-on den Plan und schreibt alle gefundenen Fächer
+ins Log:
+
+```
+Faecher im Plan (12): Biologie, Chemie, Deutsch, Englisch, Franz, Geschichte, …
+```
+
+Dieselbe Liste steht im Status-Sensor unter dem Attribut `faecher_gefunden`.
+Daraus trägst du deine eigenen Fächer in die Option `faecher` ein:
+
+```text
+Mathe, Deutsch, Franz, Nautik
+```
+
+- **Nur diese Fächer zählen** – für `sensor.schul_start`, `sensor.schul_ende`,
+  `sensor.erste_unterrichtsstunde` und `binary_sensor.wecker_morgen`.
+- **Mehrere Fächer in einer Stunde** („Deutsch / Franz“ in einer Zelle) genügt
+  eines davon. So zählt eine Vertretung nur, wenn dein Fach darin vorkommt.
+- **Tippfehler** fallen auf: Gewählte Fächer, die im Plan nicht vorkommen,
+  stehen im Attribut `faecher_unbekannt` und im Log als Warnung.
+- Leer gelassen zählen alle Stunden – das bisherige Verhalten.
 
 ## Ferien und Feiertage
 
@@ -159,7 +184,8 @@ Zusatzinformationen als Attribute:
   (z. B. `Wochenende`, `Herbstferien`, `keine Daten`) und `plan_status`
 - **Status:** `reason`, `plan_status` (`ok`, `ferien`, `kein_unterricht`,
   `error`), `bundesland`, `holidays_updated`, `fetched_at`, `age_minutes`,
-  `mqtt_connected`, `iserv_url`, `last_error`, `skipped`, `warnings`
+  `mqtt_connected`, `iserv_url`, `last_error`, `skipped`, `warnings` sowie
+  `faecher_gewaehlt`, `faecher_gefunden`, `faecher_unbekannt`
 
 `skipped` listet die übersprungenen Tage mit Grund auf (Wochenende, Ferien,
 kein Unterricht, keine Daten) – hilfreich, wenn der nächste Schultag

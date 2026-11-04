@@ -7,6 +7,7 @@ und damit vollstaendig unit-testbar.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -20,6 +21,8 @@ NOON = time(12, 0)
 # damit Automationen nicht auf "unknown" laufen.
 FALLBACK_START = time(8, 10)
 FALLBACK_END = time(13, 20)
+# Trennzeichen zwischen mehreren Faechern in einer Zelle ("Deutsch / Franz").
+SUBJECT_SPLIT_RE = re.compile(r"[/,;+&|]|\bund\b", re.IGNORECASE)
 
 STATUS_OK = "ok"
 STATUS_FERIEN = "ferien"
@@ -223,6 +226,8 @@ class PlanResult:
     day: DayPlan | None = None
     skipped: list[Skip] = field(default_factory=list)
     planned_first_period: int | None = None
+    # Stunden des Tages, die nach dem Fachfilter uebrig bleiben.
+    held: list[Lesson] = field(default_factory=list)
 
     @property
     def first_period(self) -> int | None:
@@ -356,6 +361,7 @@ def select_plan(
     holidays: list[Holiday] | None = None,
     lookahead_days: int = 21,
     cutover: time | None = NOON,
+    subjects: frozenset[str] | None = None,
 ) -> PlanResult:
     """Ermittelt den naechsten Schultag mit stattfindender Stunde.
 
@@ -367,6 +373,8 @@ def select_plan(
       uebersprungen; der Ferien-/Feiertagskalender greift nur fuer Tage, fuer
       die IServ gar keine Daten liefert (Daten haben immer Vorrang).
     * Fehlende Daten fuehren nie zu einer geratenen Startzeit.
+    * ``subjects`` beschraenkt die Zaehlung auf die eigenen Faecher: Eine Stunde
+      mit mehreren Faechern zaehlt, wenn eines davon gewaehlt ist.
     """
     now = _local(now)
     today = now.date()
@@ -388,6 +396,8 @@ def select_plan(
 
         day_plan = dataset.lookup(day) if dataset else None
         held = day_plan.held_lessons if day_plan else []
+        if subjects:
+            held = [lesson for lesson in held if lesson_matches_subjects(lesson, subjects)]
         holiday = find_holiday(day, holidays)
 
         if held:
@@ -400,6 +410,7 @@ def select_plan(
                     reason="Startzeit der ersten Stunde unbekannt",
                     skipped=skipped,
                     planned_first_period=_planned_first(day_plan),
+                    held=held,
                 )
             return PlanResult(
                 status=STATUS_OK,
@@ -410,6 +421,7 @@ def select_plan(
                 day=day_plan,
                 skipped=skipped,
                 planned_first_period=_planned_first(day_plan),
+                held=held,
             )
 
         if day_plan is not None and day_plan.is_school_day is False:
@@ -468,6 +480,7 @@ def plan_tomorrow(
     now: datetime,
     dataset: PlanDataset | None,
     holidays: list[Holiday] | None = None,
+    subjects: frozenset[str] | None = None,
 ) -> TomorrowPlan:
     """Prueft den morgigen Kalendertag ("Wecker morgen" ja/nein)."""
     tomorrow = _local(now).date() + timedelta(days=1)
@@ -476,6 +489,8 @@ def plan_tomorrow(
 
     day_plan = dataset.lookup(tomorrow) if dataset else None
     held = day_plan.held_lessons if day_plan else []
+    if subjects:
+        held = [lesson for lesson in held if lesson_matches_subjects(lesson, subjects)]
     if held:
         first = _first_timed(held)
         if first is None:
@@ -507,6 +522,56 @@ def plan_tomorrow(
     return TomorrowPlan(tomorrow, reason="kein Unterricht")
 
 
+def normalize_subject(value: str | None) -> str:
+    """Vergleichsform eines Fachnamens: Kleinschreibung, einfache Leerzeichen."""
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def split_subjects(value: str | None) -> list[str]:
+    """Einzelfaecher einer Angabe - "Deutsch / Franz" ergibt zwei Eintraege.
+
+    Faecher mit "und" im Namen bleiben erhalten, solange die Angabe als Ganzes
+    gewaehlt wurde (siehe ``lesson_matches_subjects``).
+    """
+    parts = [normalize_subject(part) for part in SUBJECT_SPLIT_RE.split(value or "")]
+    return [part for part in parts if part]
+
+
+def lesson_matches_subjects(lesson: Lesson, wanted: frozenset[str] | None) -> bool:
+    """True, wenn die Stunde zu mindestens einem gewaehlten Fach gehoert.
+
+    Ohne Auswahl zaehlt jede Stunde. Stehen in einer Zelle mehrere Faecher
+    ("Franz / Nautik"), genuegt eines davon - so zaehlt eine Vertretung nur,
+    wenn das eigene Fach darin vorkommt.
+    """
+    if not wanted:
+        return True
+    if normalize_subject(lesson.subject) in wanted:
+        return True
+    return any(part in wanted for part in split_subjects(lesson.subject))
+
+
+def subject_tokens(subjects: list[str]) -> set[str]:
+    """Alle Vergleichsformen einer Fachliste (auch die Teile mehrerer Faecher)."""
+    tokens: set[str] = set()
+    for value in subjects:
+        tokens.add(normalize_subject(value))
+        tokens.update(split_subjects(value))
+    tokens.discard("")
+    return tokens
+
+
+def dataset_subjects(dataset: PlanDataset | None) -> list[str]:
+    """Alle Facherangaben im Plan, sortiert - Grundlage fuer die Auswahl."""
+    found: set[str] = set()
+    for day in dataset.days.values() if dataset else []:
+        for lesson in day.lessons:
+            text = (lesson.subject or "").strip()
+            if text:
+                found.add(text)
+    return sorted(found, key=str.lower)
+
+
 def _last_timed(lessons: list[Lesson]) -> Lesson | None:
     """Letzte Stunde mit bekannter Endzeit - Ausfaelle sind schon aussortiert."""
     timed = [lesson for lesson in lessons if lesson.end is not None]
@@ -521,6 +586,7 @@ def school_times(
     holidays: list[Holiday] | None = None,
     lookahead_days: int = 21,
     offline: bool = False,
+    subjects: frozenset[str] | None = None,
 ) -> SchoolTimes:
     """Beginn und Ende fuer die Sensoren "Schul start" und "Schul ende".
 
@@ -547,10 +613,15 @@ def school_times(
             end_source="fallback",
         )
 
-    start_plan = select_plan(now, dataset, holidays, lookahead_days, cutover=None)
-    end_plan = select_plan(now, dataset, holidays, lookahead_days, cutover=None)
+    start_plan = select_plan(
+        now, dataset, holidays, lookahead_days, cutover=None, subjects=subjects
+    )
+    end_plan = select_plan(
+        now, dataset, holidays, lookahead_days, cutover=None, subjects=subjects
+    )
 
-    last = _last_timed(end_plan.day.held_lessons) if end_plan.day else None
+    # Nur die eigenen Faecher zaehlen fuer das Ende (Fachfilter aus select_plan).
+    last = _last_timed(end_plan.held) if end_plan.held else None
     end: datetime | None = None
     if last is not None and last.end is not None and end_plan.target_date is not None:
         end = datetime.combine(end_plan.target_date, last.end, tzinfo=TZ)

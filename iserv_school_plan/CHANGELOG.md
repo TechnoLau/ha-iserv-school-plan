@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.0
+
+**Neue Option `faecher`: nur die eigenen Fächer zählen.**
+
+- Das Add-on scannt den Plan und nennt alle gefundenen Fächer im Log
+  (`Faecher im Plan (n): …`) und im Status-Attribut `faecher_gefunden`. Daraus
+  laesst sich die neue Option `faecher` fuellen (`Mathe, Deutsch, Franz`).
+- Gewaehlte Faecher gelten fuer `schul_start`, `schul_ende`,
+  `erste_unterrichtsstunde` und `wecker_morgen`. Ein Tag ohne eigenes Fach wird
+  uebersprungen.
+- Stehen in einer Stunde mehrere Faecher ("Deutsch / Franz", "Mathe, Physik"),
+  genuegt eines davon - so zaehlt eine Vertretung nur, wenn das eigene Fach
+  darin vorkommt.
+- Gewaehlte Faecher, die im Plan nicht vorkommen, melden sich als Warnung im
+  Log und im Attribut `faecher_unbekannt` (Tippfehler-Hinweis).
+- Ohne Angabe bleibt alles wie bisher: alle Stunden zaehlen.
+
 ## 1.2.1
 
 - `sensor.schul_start` und `sensor.schul_ende` fallen nur noch dann auf die
